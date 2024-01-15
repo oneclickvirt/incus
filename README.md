@@ -8,6 +8,7 @@
 2024.01.15
 
 - 迁移LXD项目至于incus项目
+- 对无zfs的ubuntu系统增加处理
 
 [更新日志](CHANGELOG.md)
 

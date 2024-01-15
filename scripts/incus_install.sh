@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2023.11.07
+# 2024.01.15
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -216,8 +216,8 @@ checkzfs() {
                 echo "deb http://deb.debian.org/debian bookworm-backports main contrib" >/etc/apt/sources.list.d/bookworm-backports.list
                 echo "deb-src http://deb.debian.org/debian bookworm-backports main contrib" >>/etc/apt/sources.list.d/bookworm-backports.list
                 echo "Package: src:zfs-linux
-    Pin: release n=bookworm-backports
-    Pin-Priority: 990" >/etc/apt/preferences.d/90_zfs
+Pin: release n=bookworm-backports
+Pin-Priority: 990" >/etc/apt/preferences.d/90_zfs
             fi
         elif [ $SYSTEM == "Ubuntu" ]; then
             # deb http://archive.ubuntu.com/ubuntu <CODENAME> main universe
