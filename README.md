@@ -9,6 +9,7 @@
 
 - 迁移LXD项目至于incus项目
 - 对无zfs的ubuntu系统增加处理
+- 宿主机若系统重启，DNS自检测的守护进程增加ufw关闭防火墙的指令，避免重启后防火墙启动导致incus网络冲突
 
 [更新日志](CHANGELOG.md)
 
