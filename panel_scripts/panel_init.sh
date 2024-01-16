@@ -166,8 +166,8 @@ done
 
 # 资源池设置-硬盘
 # incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto
-# zfs检测与安装
-temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+# btrfs 检测与安装
+temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
 if [[ $? -ne 0 ]]; then
     status=false
 else
@@ -176,7 +176,7 @@ fi
 echo "$temp"
 if echo "$temp" | grep -q "incus.migrate" && [[ $status == false ]]; then
     incus.migrate
-    temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+    temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
     if [[ $? -ne 0 ]]; then
         status=false
     else
@@ -194,80 +194,79 @@ removezfs() {
     apt-get update
 }
 
-# https://openzfs.github.io/openzfs-docs/Getting%20Started/
-checkzfs() {
-    if echo "$temp" | grep -q "'zfs' isn't available" && [[ $status == false ]]; then
-        _green "zfs module call failed, trying to compile zfs module plus load kernel..."
-        _green "zfs模块调用失败，尝试编译zfs模块加载入内核..."
-        if [ $SYSTEM == "Debian" ]; then
-            #   apt-get install -y linux-headers-amd64
-            codename=$(lsb_release -cs)
-            lineToRemove="deb http://deb.debian.org/debian ${codename}-backports main contrib non-free"
-            echo "deb http://deb.debian.org/debian ${codename}-backports main contrib non-free" | sudo tee -a /etc/apt/sources.list && apt-get update
-            #   apt-get install -y linux-headers-amd64
-            install_package ${codename}-backports
-            if grep -q "deb http://deb.debian.org/debian bookworm-backports main contrib" /etc/apt/sources.list.d/bookworm-backports.list && grep -q "deb-src http://deb.debian.org/debian bookworm-backports main contrib" /etc/apt/sources.list.d/bookworm-backports.list; then
-                echo "已修改源"
-            else
-                echo "deb http://deb.debian.org/debian bookworm-backports main contrib" >/etc/apt/sources.list.d/bookworm-backports.list
-                echo "deb-src http://deb.debian.org/debian bookworm-backports main contrib" >>/etc/apt/sources.list.d/bookworm-backports.list
-                echo "Package: src:zfs-linux
-Pin: release n=bookworm-backports
-Pin-Priority: 990" >/etc/apt/preferences.d/90_zfs
-            fi
-        elif [ $SYSTEM == "Ubuntu" ]; then
-            # deb http://archive.ubuntu.com/ubuntu <CODENAME> main universe
-            codename=$(lsb_release -cs)
-            lineToRemove="deb http://archive.ubuntu.com/ubuntu ${codename} main universe"
-            echo "deb http://archive.ubuntu.com/ubuntu ${codename} main universe" | sudo tee -a /etc/apt/sources.list && apt-get update
-        fi
-        apt-get update
-        apt-get install -y dpkg-dev linux-headers-generic linux-image-generic
-        if [ $? -ne 0 ]; then
-            apt-get install -y dpkg-dev linux-headers-generic linux-image-generic --fix-missing
-        fi
-        if [[ $? -ne 0 ]]; then
-            status=false
-            removezfs
-            return
-        else
-            status=true
-        fi
-        apt-get install -y zfsutils-linux
-        if [ $? -ne 0 ]; then
-            apt-get install -y zfsutils-linux --fix-missing
-        fi
-        if [[ $? -ne 0 ]]; then
-            status=false
-            removezfs
-            return
-        else
-            status=true
-        fi
-        apt-get install -y zfs-dkms
-        if [ $? -ne 0 ]; then
-            apt-get install -y zfs-dkms --fix-missing
-        fi
-        if [[ $? -ne 0 ]]; then
-            status=false
-            removezfs
-            return
-        else
-            status=true
-        fi
-        _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the new kernel, after the reboot you will need to enter the configuration you need again"
-        _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载新内核，重启后需要再次输入你需要的配置"
-        exit 1
-    fi
-}
+# # https://openzfs.github.io/openzfs-docs/Getting%20Started/
+# checkzfs() {
+#     if echo "$temp" | grep -q "'zfs' isn't available" && [[ $status == false ]]; then
+#         _green "zfs module call failed, trying to compile zfs module plus load kernel..."
+#         _green "zfs模块调用失败，尝试编译zfs模块加载入内核..."
+#         if [ $SYSTEM == "Debian" ]; then
+#             #   apt-get install -y linux-headers-amd64
+#             codename=$(lsb_release -cs)
+#             lineToRemove="deb http://deb.debian.org/debian ${codename}-backports main contrib non-free"
+#             echo "deb http://deb.debian.org/debian ${codename}-backports main contrib non-free" | sudo tee -a /etc/apt/sources.list && apt-get update
+#             #   apt-get install -y linux-headers-amd64
+#             install_package ${codename}-backports
+#             if grep -q "deb http://deb.debian.org/debian bookworm-backports main contrib" /etc/apt/sources.list.d/bookworm-backports.list && grep -q "deb-src http://deb.debian.org/debian bookworm-backports main contrib" /etc/apt/sources.list.d/bookworm-backports.list; then
+#                 echo "已修改源"
+#             else
+#                 echo "deb http://deb.debian.org/debian bookworm-backports main contrib" >/etc/apt/sources.list.d/bookworm-backports.list
+#                 echo "deb-src http://deb.debian.org/debian bookworm-backports main contrib" >>/etc/apt/sources.list.d/bookworm-backports.list
+#                 echo "Package: src:zfs-linux
+# Pin: release n=bookworm-backports
+# Pin-Priority: 990" >/etc/apt/preferences.d/90_zfs
+#             fi
+#         elif [ $SYSTEM == "Ubuntu" ]; then
+#             # deb http://archive.ubuntu.com/ubuntu <CODENAME> main universe
+#             codename=$(lsb_release -cs)
+#             lineToRemove="deb http://archive.ubuntu.com/ubuntu ${codename} main universe"
+#             echo "deb http://archive.ubuntu.com/ubuntu ${codename} main universe" | sudo tee -a /etc/apt/sources.list && apt-get update
+#         fi
+#         apt-get update
+#         apt-get install -y dpkg-dev linux-headers-generic linux-image-generic
+#         if [ $? -ne 0 ]; then
+#             apt-get install -y dpkg-dev linux-headers-generic linux-image-generic --fix-missing
+#         fi
+#         if [[ $? -ne 0 ]]; then
+#             status=false
+#             removezfs
+#             return
+#         else
+#             status=true
+#         fi
+#         apt-get install -y zfsutils-linux
+#         if [ $? -ne 0 ]; then
+#             apt-get install -y zfsutils-linux --fix-missing
+#         fi
+#         if [[ $? -ne 0 ]]; then
+#             status=false
+#             removezfs
+#             return
+#         else
+#             status=true
+#         fi
+#         apt-get install -y zfs-dkms
+#         if [ $? -ne 0 ]; then
+#             apt-get install -y zfs-dkms --fix-missing
+#         fi
+#         if [[ $? -ne 0 ]]; then
+#             status=false
+#             removezfs
+#             return
+#         else
+#             status=true
+#         fi
+#         _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the new kernel, after the reboot you will need to enter the configuration you need again"
+#         _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载新内核，重启后需要再次输入你需要的配置"
+#         exit 1
+#     fi
+# }
 
-checkzfs
+# checkzfs
 if [[ $status == false ]]; then
-    _yellow "zfs compilation failed, trying to use another storage type ......"
-    _yellow "zfs编译失败，尝试使用其他存储类型......"
+    _yellow "trying to use another storage type ......"
+    _yellow "尝试使用其他存储类型......"
     # 类型设置-硬盘
-    # "zfs"
-    SUPPORTED_BACKENDS=("lvm" "btrfs" "ceph" "dir")
+    SUPPORTED_BACKENDS=("lvm" "ceph" "zfs" "dir")
     STORAGE_BACKEND=""
     for backend in "${SUPPORTED_BACKENDS[@]}"; do
         if command -v $backend >/dev/null; then
@@ -284,18 +283,23 @@ if [[ $status == false ]]; then
     fi
     #   if [ "$STORAGE_BACKEND" = "zfs" ]; then
     #       incus admin init --storage-backend "$STORAGE_BACKEND" --storage-create-loop "$disk_nums" --storage-pool default --auto
-    if [ "$STORAGE_BACKEND" = "dir" ]; then
-        _green "Infinite storage pool size using default dir type due to no zfs"
-        _green "由于无zfs，使用默认dir类型无限定存储池大小"
-        incus admin init --storage-backend "$STORAGE_BACKEND" --auto
-    elif [ "$STORAGE_BACKEND" = "lvm" ]; then
+    if [ "$STORAGE_BACKEND" = "lvm" ]; then
         _green "Infinite storage pool size using default lvm type due to no zfs"
         _green "由于无zfs，使用默认lvm类型无限定存储池大小"
         DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
         incus admin init --storage-backend lvm --storage-create-device $DISK --storage-pool lvm_pool --auto
+        echo "lvm" >/usr/local/bin/incus_storage_type
+    elif [ "$STORAGE_BACKEND" = "dir" ]; then
+        _green "Infinite storage pool size using default dir type due to no zfs"
+        _green "由于无zfs，使用默认dir类型无限定存储池大小"
+        incus admin init --storage-backend "$STORAGE_BACKEND" --auto
+        echo "dir" >/usr/local/bin/incus_storage_type
     else
         incus admin init --storage-backend "$STORAGE_BACKEND" --storage-create-device "$disk_nums" --storage-pool default --auto
+        echo "$STORAGE_BACKEND" >/usr/local/bin/incus_storage_type
     fi
+else
+    echo "btrfs" >/usr/local/bin/incus_storage_type
 fi
 install_package uidmap
 
