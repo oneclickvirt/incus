@@ -158,11 +158,18 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 # 硬盘大小
+if [ -f /usr/local/bin/incus_storage_type ]; then
+    storage_type=$(cat /usr/local/bin/incus_storage_type)
+else
+    storage_type="btrfs"
+fi
 if [[ $disk == *.* ]]; then
     disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
+    incus storage create "$name" "$storage_type" size="$disk_mb"MB >/dev/null 2>&1
     incus config device override "$name" root size="$disk_mb"MB
     incus config device set "$name" root limits.max "$disk_mb"MB
 else
+    incus storage create "$name" "$storage_type" size="$disk"GB >/dev/null 2>&1
     incus config device override "$name" root size="$disk"GB
     incus config device set "$name" root limits.max "$disk"GB
 fi
