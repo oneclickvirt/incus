@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.01.15
+# 2024.01.16
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -74,8 +74,8 @@ check_cdn_file() {
 
 statistics_of_run-times() {
     COUNT=$(
-        curl -4 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2FspiritLHLS%2Flxc&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1 ||
-            curl -6 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2FspiritLHLS%2Flxc&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1
+        curl -4 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Foneclickvirt%2Fincus&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1 ||
+            curl -6 -ksm1 "https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Foneclickvirt%2Fincus&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=&edge_flat=true" 2>&1
     ) &&
         TODAY=$(expr "$COUNT" : '.*\s\([0-9]\{1,\}\)\s/.*') && TOTAL=$(expr "$COUNT" : '.*/\s\([0-9]\{1,\}\)\s.*')
 }
@@ -306,10 +306,6 @@ install_package uidmap
 # 虚拟内存设置
 curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/swap2.sh" -o swap2.sh && chmod +x swap2.sh
 ./swap2.sh "$memory_nums"
-sleep 2
-! incus -h >/dev/null 2>&1 && echo 'alias lxc="/snap/bin/lxc"' >>/root/.bashrc && source /root/.bashrc
-export PATH=$PATH:/snap/bin
-! incus -h >/dev/null 2>&1 && _yellow '使用 incus -h 检测到路径有问题，请手动查看incus是否安装成功' && exit 1
 # 设置镜像不更新
 incus config unset images.auto_update_interval
 incus config set images.auto_update_interval 0
