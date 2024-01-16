@@ -220,34 +220,26 @@ else
     incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
 fi
 if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
-    if [ -z "$image_download_url" ]; then
-        if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
-            curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
-            chmod 777 /usr/local/bin/ssh_sh.sh
-            dos2unix /usr/local/bin/ssh_sh.sh
-        fi
-        cp /usr/local/bin/ssh_sh.sh /root
-        incus file push /root/ssh_sh.sh "$name"/root/
-        incus exec "$name" -- chmod 777 ssh_sh.sh
-        incus exec "$name" -- ./ssh_sh.sh ${passwd}
-    else
-        incus exec "$name" -- { echo root:"${passwd}" | chpasswd root };
+    if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
+        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
+        chmod 777 /usr/local/bin/ssh_sh.sh
+        dos2unix /usr/local/bin/ssh_sh.sh
     fi
+    cp /usr/local/bin/ssh_sh.sh /root
+    incus file push /root/ssh_sh.sh "$name"/root/
+    incus exec "$name" -- chmod 777 ssh_sh.sh
+    incus exec "$name" -- ./ssh_sh.sh ${passwd}
 else
-    if [ -z "$image_download_url" ]; then
-        if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-            curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-            chmod 777 /usr/local/bin/ssh_bash.sh
-            dos2unix /usr/local/bin/ssh_bash.sh
-        fi
-        cp /usr/local/bin/ssh_bash.sh /root
-        incus file push /root/ssh_bash.sh "$name"/root/
-        incus exec "$name" -- chmod 777 ssh_bash.sh
-        incus exec "$name" -- dos2unix ssh_bash.sh
-        incus exec "$name" -- sudo ./ssh_bash.sh $passwd
-    else
-        incus exec "$name" -- { echo root:"$passwd" | sudo chpasswd root };
+    if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
+        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
+        chmod 777 /usr/local/bin/ssh_bash.sh
+        dos2unix /usr/local/bin/ssh_bash.sh
     fi
+    cp /usr/local/bin/ssh_bash.sh /root
+    incus file push /root/ssh_bash.sh "$name"/root/
+    incus exec "$name" -- chmod 777 ssh_bash.sh
+    incus exec "$name" -- dos2unix ssh_bash.sh
+    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
     if [ ! -f /usr/local/bin/config.sh ]; then
         curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
         chmod 777 /usr/local/bin/config.sh
