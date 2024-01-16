@@ -3,7 +3,7 @@
 # https://github.com/oneclickvirt/incus
 # cd /root
 # ./init.sh NAT服务器前缀 数量
-# 2023.12.11
+# 2024.01.16
 
 cd /root >/dev/null 2>&1
 if [ ! -d "/usr/local/bin" ]; then
@@ -34,6 +34,12 @@ if [ $? -ne 0 ]; then
   incus init tuna-images:debian/11 "$1" -c limits.cpu=1 -c limits.memory=256MiB
 fi
 # 硬盘大小
+if [ -f /usr/local/bin/incus_storage_type ]; then
+    storage_type=$(cat /usr/local/bin/incus_storage_type)
+else
+    storage_type="btrfs"
+fi
+incus storage create "$1" "$storage_type" size=1GB >/dev/null 2>&1
 incus config device override "$1" root size=1GB
 incus config device set "$1" root limits.max 1GB
 # IO
