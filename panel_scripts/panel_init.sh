@@ -205,14 +205,14 @@ if [[ $status == false ]]; then
         exit 1
     fi
     if [ "$STORAGE_BACKEND" = "lvm" ]; then
-        _green "Infinite storage pool size using default lvm type due to no zfs"
-        _green "由于无zfs，使用默认lvm类型无限定存储池大小"
+        _green "Infinite storage pool size using default lvm type due to no btrfs"
+        _green "由于无btrfs，使用默认lvm类型无限定存储池大小"
         DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
         incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto
         echo "lvm" >/usr/local/bin/incus_storage_type
     elif [ "$STORAGE_BACKEND" = "dir" ]; then
-        _green "Infinite storage pool size using default dir type due to no zfs"
-        _green "由于无zfs，使用默认dir类型无限定存储池大小"
+        _green "Infinite storage pool size using default dir type due to no btrfs"
+        _green "由于无btrfs，使用默认dir类型无限定存储池大小"
         incus admin init --storage-backend "$STORAGE_BACKEND" --auto
         echo "dir" >/usr/local/bin/incus_storage_type
     else
