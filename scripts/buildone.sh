@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2023.12.21
+# 2024.01.16
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
@@ -51,9 +51,7 @@ check_cdn_file() {
     fi
 }
 
-check_china
-cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
-check_cdn_file
+# 读取输入
 name="${1:-test}"
 cpu="${2:-1}"
 memory="${3:-256}"
@@ -68,7 +66,6 @@ enable_ipv6=$(echo "$enable_ipv6" | tr '[:upper:]' '[:lower:]')
 system="${11:-debian11}"
 a="${system%%[0-9]*}"
 b="${system##*[!0-9.]}"
-output=$(incus image list images:${a}/${b})
 sys_bit=""
 sysarch="$(uname -m)"
 case "${sysarch}" in
@@ -82,11 +79,46 @@ case "${sysarch}" in
     #     "ppc64") sys_bit="ppc64";;
 *) sys_bit="x86_64" ;;
 esac
-if echo "$output" | grep -q "${a}"; then
+
+# 前置环境判断
+check_china
+cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
+check_cdn_file
+
+# 处理镜像是否存在，是否使用自编译、官方、第三方镜像的问题
+image_download_url=""
+if [ "$sys_bit" == "x86_64" ]; then
+    # 暂时仅支持x86_64的架构使用自编译的第三方包
+    response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
+    if [ $? -ne 0 ]; then
+        response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://githubapi.spiritlhl.top/repos/oneclickvirt/incus_images/releases/tags/${a}")
+    fi
+    assets_count=$(echo "$response" | jq '.assets | length')
+    for ((i=0; i<assets_count; i++)); do
+        image_name=$(echo "$response" | jq -r ".assets[$i].name")
+        if [[ "$image_name" == "${a}_${b}"* ]]; then
+            image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
+            image_alias_output=$(incus image alias list)
+            if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                wget "${cdn_success_url}${image_download_url}"
+                chmod 777 "$image_name"
+                unzip "$image_name"
+                rm -rf "$image_name"
+                # 导入为对应镜像
+                incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
+                rm -rf incus.tar.xz rootfs.squashfs
+            fi
+            break
+        fi
+    done
+else
+    output=$(incus image list images:${a}/${b})
+fi
+if [ -z "$image_download_url" ] && { echo "$output" | grep -q "${a}"; }; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
     echo "匹配的镜像存在，将使用 images:${system} 进行创建"
-else
+elif [ -z "$image_download_url" ]; then
     system=$(incus image list tuna-images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna="F"
@@ -109,11 +141,15 @@ else
         exit 1
     fi
 fi
+
+# 开始创建容器
 rm -rf "$name"
-if [ "$status_tuna" == "T" ]; then
+if [ -z "$image_download_url" ] && [ "$status_tuna" == "T" ]; then
     incus init tuna-images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
-else
+elif [ -z "$image_download_url" ]; then
     incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+else
+    incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
 fi
 # --config=user.network-config="network:\n  version: 2\n  ethernets:\n    eth0:\n      nameservers:\n        addresses: [8.8.8.8, 8.8.4.4]"
 if [ $? -ne 0 ]; then
@@ -184,26 +220,34 @@ else
     incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
 fi
 if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
-    if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
-        chmod 777 /usr/local/bin/ssh_sh.sh
-        dos2unix /usr/local/bin/ssh_sh.sh
+    if [ -z "$image_download_url" ]; then
+        if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
+            curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
+            chmod 777 /usr/local/bin/ssh_sh.sh
+            dos2unix /usr/local/bin/ssh_sh.sh
+        fi
+        cp /usr/local/bin/ssh_sh.sh /root
+        incus file push /root/ssh_sh.sh "$name"/root/
+        incus exec "$name" -- chmod 777 ssh_sh.sh
+        incus exec "$name" -- ./ssh_sh.sh ${passwd}
+    else
+        incus exec "$name" -- { echo root:"${passwd}" | chpasswd root };
     fi
-    cp /usr/local/bin/ssh_sh.sh /root
-    incus file push /root/ssh_sh.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_sh.sh
-    incus exec "$name" -- ./ssh_sh.sh ${passwd}
 else
-    if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-        chmod 777 /usr/local/bin/ssh_bash.sh
-        dos2unix /usr/local/bin/ssh_bash.sh
+    if [ -z "$image_download_url" ]; then
+        if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
+            curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
+            chmod 777 /usr/local/bin/ssh_bash.sh
+            dos2unix /usr/local/bin/ssh_bash.sh
+        fi
+        cp /usr/local/bin/ssh_bash.sh /root
+        incus file push /root/ssh_bash.sh "$name"/root/
+        incus exec "$name" -- chmod 777 ssh_bash.sh
+        incus exec "$name" -- dos2unix ssh_bash.sh
+        incus exec "$name" -- sudo ./ssh_bash.sh $passwd
+    else
+        incus exec "$name" -- { echo root:"$passwd" | sudo chpasswd root };
     fi
-    cp /usr/local/bin/ssh_bash.sh /root
-    incus file push /root/ssh_bash.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_bash.sh
-    incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
     if [ ! -f /usr/local/bin/config.sh ]; then
         curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
         chmod 777 /usr/local/bin/config.sh
