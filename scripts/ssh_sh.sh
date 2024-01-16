@@ -60,6 +60,8 @@ elif [ "$(cat /etc/os-release | grep -E '^ID=' | cut -d '=' -f 2 | tr -d '"')" =
   echo -e "$1\n$1" | passwd root
   /etc/init.d/sshd restart
 fi
+/etc/init.d/cron enable || true
+/etc/init.d/cron start || true
 if [ -f "/etc/motd" ]; then
   echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
   echo '--by https://t.me/spiritlhl' >>/etc/motd
