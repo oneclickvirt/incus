@@ -30,6 +30,10 @@ VPS融合怪测评脚本
 
 https://github.com/spiritLHLS/ecs
 
+## Sponsor
+
+Thanks to [dartnode](https://dartnode.com/?via=server) for compilation support.
+
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/oneclickvirt/incus.svg?background=%23FFFFFF&axis=%23333333&line=%236b63ff)](https://starchart.cc/oneclickvirt/incus)
