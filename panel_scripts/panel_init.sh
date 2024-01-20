@@ -117,6 +117,8 @@ install_package dos2unix
 install_package ufw
 install_package jq
 install_package uidmap
+install_package ipcalc
+install_package unzip
 check_cdn_file
 rebuild_cloud_init
 apt-get remove cloud-init -y
