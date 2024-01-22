@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.01.20
+# 2024.01.22
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -260,12 +260,6 @@ done
 cp /root/ssh_sh.sh /usr/local/bin
 cp /root/ssh_bash.sh /usr/local/bin
 cp /root/config.sh /usr/local/bin
-# 设置IPV4优先
-sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf && systemctl restart networking
-# 加载iptables并设置回源且允许NAT端口转发
-install_package iptables
-install_package iptables-persistent
-iptables -t nat -A POSTROUTING -j MASQUERADE
 sysctl net.ipv4.ip_forward=1
 sysctl_path=$(which sysctl)
 if grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
@@ -342,6 +336,12 @@ if [ ! -f /etc/systemd/system/check-dns.service ]; then
 else
     echo "Service already exists. Skipping installation."
 fi
+# 设置IPV4优先
+sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf && systemctl restart networking
+# 加载iptables并设置回源且允许NAT端口转发
+install_package iptables
+install_package iptables-persistent
+iptables -t nat -A POSTROUTING -j MASQUERADE
 _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
 _green "If you need to turn on more than 100 cts, it is recommended to wait for a few minutes before performing a reboot to reboot the machine to make the settings take effect"
 _green "The reboot will ensure that the DNS detection mechanism takes effect, otherwise the batch opening process may cause the host's DNS to be overwritten by the merchant's preset"
