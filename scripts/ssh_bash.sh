@@ -67,7 +67,7 @@ install_required_modules() {
         fi
     done
     if command -v apt-get >/dev/null 2>&1; then
-        ${PACKAGE_INSTALL[int]} cron 
+        ${PACKAGE_INSTALL[int]} cron
     else
         ${PACKAGE_INSTALL[int]} cronie
     fi
@@ -94,8 +94,10 @@ sudo service sshd start
 sudo systemctl start sshd
 sudo systemctl start ssh
 if [ -f "/etc/motd" ]; then
-    echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
-    echo '--by https://t.me/spiritlhl' >>/etc/motd
+    if ! grep -q 'Related repo https://github.com/oneclickvirt/incus' /etc/motd && ! grep -q '--by https://t.me/spiritlhl' /etc/motd; then
+        echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
+        echo '--by https://t.me/spiritlhl' >>/etc/motd
+    fi
 fi
 sudo service iptables stop 2>/dev/null
 chkconfig iptables off 2>/dev/null

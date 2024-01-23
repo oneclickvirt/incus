@@ -2,7 +2,6 @@
 # by https://github.com/oneclickvirt/incus
 # 2024.01.16
 
-
 if [ "$(id -u)" -ne 0 ]; then
   echo "This script must be executed with root privileges."
   exit 1
@@ -63,11 +62,15 @@ fi
 /etc/init.d/cron enable || true
 /etc/init.d/cron start || true
 if [ -f "/etc/motd" ]; then
-  echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
-  echo '--by https://t.me/spiritlhl' >>/etc/motd
+  if ! grep -q 'Related repo https://github.com/oneclickvirt/incus' /etc/motd && ! grep -q '--by https://t.me/spiritlhl' /etc/motd; then
+    echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
+    echo '--by https://t.me/spiritlhl' >>/etc/motd
+  fi
 fi
 if [ -f "/etc/banner" ]; then
-  echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/banner
-  echo '--by https://t.me/spiritlhl' >>/etc/banner
+  if ! grep -q 'Related repo https://github.com/oneclickvirt/incus' /etc/banner && ! grep -q '--by https://t.me/spiritlhl' /etc/banner; then
+    echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/banner
+    echo '--by https://t.me/spiritlhl' >>/etc/banner
+  fi
 fi
 rm -f "$0"
