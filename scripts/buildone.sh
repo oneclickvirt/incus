@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2024.01.16
+# 2024.02.06
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)

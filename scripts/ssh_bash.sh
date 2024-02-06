@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.02.26
+# 2024.02.06
 
 if [ -f "/etc/resolv.conf" ]; then
     cp /etc/resolv.conf /etc/resolv.conf.bak
