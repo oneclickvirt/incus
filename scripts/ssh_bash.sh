@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2023.12.21
+# 2024.02.26
 
 if [ -f "/etc/resolv.conf" ]; then
     cp /etc/resolv.conf /etc/resolv.conf.bak
@@ -94,10 +94,9 @@ sudo service sshd start
 sudo systemctl start sshd
 sudo systemctl start ssh
 if [ -f "/etc/motd" ]; then
-    if ! grep -q 'Related repo https://github.com/oneclickvirt/incus' /etc/motd && ! grep -q '--by https://t.me/spiritlhl' /etc/motd; then
-        echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
-        echo '--by https://t.me/spiritlhl' >>/etc/motd
-    fi
+    echo '' >/etc/motd
+    echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
+    echo '--by https://t.me/spiritlhl' >>/etc/motd
 fi
 sudo service iptables stop 2>/dev/null
 chkconfig iptables off 2>/dev/null
