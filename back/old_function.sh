@@ -96,3 +96,7 @@ Pin-Priority: 990" >/etc/apt/preferences.d/90_zfs
 }
 
 checkzfs
+
+
+_green "It is recommended that btrfs-progs be pre-installed to avoid problems with subsequent one-click installations, and it is recommended that the system be rebooted after installation to load the settings."
+_green "建议预装 btrfs-progs 避免后续一键安装出现问题，安装后建议重启系统以加载设置"
