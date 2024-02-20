@@ -28,16 +28,6 @@ VPS融合怪测评脚本
 
 https://github.com/spiritLHLS/ecs
 
-## Sponsor
-
-Thanks to 
-
-<a href="https://ekire.net/" target="_blank">
-  <img src="https://ekire.net/assets/img/bl.png" alt="ekire">
-</a>
-
-for providing support for images compilation.
-
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/oneclickvirt/incus.svg?background=%23FFFFFF&axis=%23333333&line=%236b63ff)](https://starchart.cc/oneclickvirt/incus)
