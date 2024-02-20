@@ -30,7 +30,13 @@ https://github.com/spiritLHLS/ecs
 
 ## Sponsor
 
-Thanks to [dartnode](https://dartnode.com/?via=server) for compilation support.
+Thanks to 
+
+<a href="https://ekire.net/" target="_blank">
+  <img src="https://ekire.net/assets/img/bl.png" alt="ekire">
+</a>
+
+for providing support for images compilation.
 
 ## Stargazers over time
 
