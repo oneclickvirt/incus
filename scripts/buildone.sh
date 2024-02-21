@@ -145,25 +145,27 @@ else
     output=$(incus image list images:${a}/${b})
 fi
 # 宿主机为arm架构或未识别到要下载的容器链接时
-if [ -z "$image_download_url" ] && [ "$fixed_system" = false ]; then
+if [ -z "$image_download_url" ]; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
     echo "匹配的镜像存在，将使用 images:${system} 进行创建"
+    fixed_system=false
 fi
-if [ -z "$image_download_url" ] && [ -z "$system" ] && [ "$fixed_system" = false ]; then
+if [ -z "$image_download_url" ] && [ -z "$system" ]; then
     system=$(incus image list tuna-images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
-        status_tuna="F"
+        status_tuna=false
     else
         if echo "$system" | grep -q "${a}"; then
             echo "A matching image exists and will be created using tuna-images:${system}"
             echo "匹配的镜像存在，将使用 tuna-images:${system} 进行创建"
-            status_tuna="T"
+            status_tuna=true
+            fixed_system=false
         else
-            status_tuna="F"
+            status_tuna=false
         fi
     fi
-    if [ "$status_tuna" == "F" ]; then
+    if [ "$status_tuna" = false ]; then
         echo "No matching image found, please execute"
         echo "incus image list images:system/version_number OR incus image list tuna-images:system/version_number"
         echo "Check if a corresponding image exists"
@@ -176,7 +178,7 @@ fi
 
 # 开始创建容器
 rm -rf "$name"
-if [ -z "$image_download_url" ] && [ "$status_tuna" == "T" ]; then
+if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
     incus init tuna-images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
 elif [ -z "$image_download_url" ]; then
     incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
