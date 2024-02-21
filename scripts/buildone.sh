@@ -129,6 +129,8 @@ if [ "$sys_bit" == "x86_64" ]; then
                     # 导入为对应镜像
                     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
                     rm -rf incus.tar.xz rootfs.squashfs
+                    echo "A matching image exists and will be created using ${image_download_url}"
+                    echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
                 fi
                 break
             fi
@@ -138,11 +140,12 @@ else
     output=$(incus image list images:${a}/${b})
 fi
 # 宿主机为arm架构或未识别到要下载的容器链接时
-if [ -z "$image_download_url" ] && { echo "$output" | grep -q "${a}"; }; then
+if [ -z "$image_download_url" ]; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
     echo "匹配的镜像存在，将使用 images:${system} 进行创建"
-elif [ -z "$image_download_url" ]; then
+fi
+if [ -z "$image_download_url" ] && [ -z "$system" ]; then
     system=$(incus image list tuna-images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna="F"
