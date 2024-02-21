@@ -87,6 +87,7 @@ check_cdn_file
 
 # 处理镜像是否存在，是否使用自编译、官方、第三方镜像的问题
 image_download_url=""
+fixed_system=false
 if [ "$sys_bit" == "x86_64" ]; then
     # 暂时仅支持x86_64的架构使用自编译的第三方包
     # response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
@@ -101,6 +102,7 @@ if [ "$sys_bit" == "x86_64" ]; then
         if [ -z "${b}" ]; then
             # 若无版本号，则仅识别系统名字匹配第一个链接，放宽系统识别
             if [[ "$image_name" == "${a}"* ]]; then
+                fixed_system=true
                 # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
                 image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
                 image_alias_output=$(incus image alias list)
@@ -112,12 +114,15 @@ if [ "$sys_bit" == "x86_64" ]; then
                     # 导入为对应镜像
                     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
                     rm -rf incus.tar.xz rootfs.squashfs
+                    echo "A matching image exists and will be created using ${image_download_url}"
+                    echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
                 fi
                 break
             fi
         else
             # 有版本号，精确识别系统
             if [[ "$image_name" == "${a}_${b}"* ]]; then
+                fixed_system=true
                 # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
                 image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
                 image_alias_output=$(incus image alias list)
@@ -140,12 +145,12 @@ else
     output=$(incus image list images:${a}/${b})
 fi
 # 宿主机为arm架构或未识别到要下载的容器链接时
-if [ -z "$image_download_url" ]; then
+if [ -z "$image_download_url" ] && [ "$fixed_system" = false ]; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
     echo "匹配的镜像存在，将使用 images:${system} 进行创建"
 fi
-if [ -z "$image_download_url" ] && [ -z "$system" ]; then
+if [ -z "$image_download_url" ] && [ -z "$system" ] && [ "$fixed_system" = false ]; then
     system=$(incus image list tuna-images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna="F"
@@ -226,32 +231,34 @@ incus start "$name"
 sleep 3
 /usr/local/bin/check-dns.sh
 sleep 3
-if [[ "${CN}" == true ]]; then
-    incus exec "$name" -- yum install -y curl
-    incus exec "$name" -- apt-get install curl -y --fix-missing
-    incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-    incus exec "$name" -- chmod 777 ChangeMirrors.sh
-    incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips
-    incus exec "$name" -- rm -rf ChangeMirrors.sh
-fi
-if echo "$system" | grep -qiE "centos" || echo "$system" | grep -qiE "almalinux" || echo "$system" | grep -qiE "fedora" || echo "$system" | grep -qiE "rocky" || echo "$system" | grep -qiE "oracle"; then
-    incus exec "$name" -- sudo yum update -y
-    incus exec "$name" -- sudo yum install -y curl
-    incus exec "$name" -- sudo yum install -y dos2unix
-elif echo "$system" | grep -qiE "alpine"; then
-    incus exec "$name" -- apk update
-    incus exec "$name" -- apk add --no-cache curl
-elif echo "$system" | grep -qiE "openwrt"; then
-    incus exec "$name" -- opkg update
-elif echo "$system" | grep -qiE "archlinux"; then
-    incus exec "$name" -- pacman -Sy
-    incus exec "$name" -- pacman -Sy --noconfirm --needed curl
-    incus exec "$name" -- pacman -Sy --noconfirm --needed dos2unix
-    incus exec "$name" -- pacman -Sy --noconfirm --needed bash
-else
-    incus exec "$name" -- sudo apt-get update -y
-    incus exec "$name" -- sudo apt-get install curl -y --fix-missing
-    incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
+if [ "$fixed_system" = false ]; then
+    if [[ "${CN}" == true ]]; then
+        incus exec "$name" -- yum install -y curl
+        incus exec "$name" -- apt-get install curl -y --fix-missing
+        incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
+        incus exec "$name" -- chmod 777 ChangeMirrors.sh
+        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips
+        incus exec "$name" -- rm -rf ChangeMirrors.sh
+    fi
+    if echo "$system" | grep -qiE "centos" || echo "$system" | grep -qiE "almalinux" || echo "$system" | grep -qiE "fedora" || echo "$system" | grep -qiE "rocky" || echo "$system" | grep -qiE "oracle"; then
+        incus exec "$name" -- sudo yum update -y
+        incus exec "$name" -- sudo yum install -y curl
+        incus exec "$name" -- sudo yum install -y dos2unix
+    elif echo "$system" | grep -qiE "alpine"; then
+        incus exec "$name" -- apk update
+        incus exec "$name" -- apk add --no-cache curl
+    elif echo "$system" | grep -qiE "openwrt"; then
+        incus exec "$name" -- opkg update
+    elif echo "$system" | grep -qiE "archlinux"; then
+        incus exec "$name" -- pacman -Sy
+        incus exec "$name" -- pacman -Sy --noconfirm --needed curl
+        incus exec "$name" -- pacman -Sy --noconfirm --needed dos2unix
+        incus exec "$name" -- pacman -Sy --noconfirm --needed bash
+    else
+        incus exec "$name" -- sudo apt-get update -y
+        incus exec "$name" -- sudo apt-get install curl -y --fix-missing
+        incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
+    fi
 fi
 if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
     if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
