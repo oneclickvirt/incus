@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2024.02.06
+# 2024.02.21
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
@@ -89,31 +89,55 @@ check_cdn_file
 image_download_url=""
 if [ "$sys_bit" == "x86_64" ]; then
     # 暂时仅支持x86_64的架构使用自编译的第三方包
-    response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
-    if [ $? -ne 0 ]; then
-        response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://githubapi.spiritlhl.top/repos/oneclickvirt/incus_images/releases/tags/${a}")
-    fi
-    assets_count=$(echo "$response" | jq '.assets | length')
-    for ((i=0; i<assets_count; i++)); do
-        image_name=$(echo "$response" | jq -r ".assets[$i].name")
-        if [[ "$image_name" == "${a}_${b}"* ]]; then
-            image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
-            image_alias_output=$(incus image alias list)
-            if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                wget "${cdn_success_url}${image_download_url}"
-                chmod 777 "$image_name"
-                unzip "$image_name"
-                rm -rf "$image_name"
-                # 导入为对应镜像
-                incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
-                rm -rf incus.tar.xz rootfs.squashfs
+    # response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
+    # if [ $? -ne 0 ]; then
+    #     response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://githubapi.spiritlhl.top/repos/oneclickvirt/incus_images/releases/tags/${a}")
+    # fi
+    # assets_count=$(echo "$response" | jq '.assets | length')
+    # for ((i=0; i<assets_count; i++)); do
+        # image_name=$(echo "$response" | jq -r ".assets[$i].name")
+    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/fixed_images.txt))
+    for image_name in "${self_fixed_images[@]}"; do
+        if [ -z "${b}" ]; then
+            # 若无版本号，则仅识别系统名字匹配第一个链接，放宽系统识别
+            if [[ "$image_name" == "${a}"* ]]; then
+                # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
+                image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
+                image_alias_output=$(incus image alias list)
+                if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                    wget "${cdn_success_url}${image_download_url}"
+                    chmod 777 "$image_name"
+                    unzip "$image_name"
+                    rm -rf "$image_name"
+                    # 导入为对应镜像
+                    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
+                    rm -rf incus.tar.xz rootfs.squashfs
+                fi
+                break
             fi
-            break
+        else
+            # 有版本号，精确识别系统
+            if [[ "$image_name" == "${a}_${b}"* ]]; then
+                # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
+                image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
+                image_alias_output=$(incus image alias list)
+                if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                    wget "${cdn_success_url}${image_download_url}"
+                    chmod 777 "$image_name"
+                    unzip "$image_name"
+                    rm -rf "$image_name"
+                    # 导入为对应镜像
+                    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
+                    rm -rf incus.tar.xz rootfs.squashfs
+                fi
+                break
+            fi
         fi
     done
 else
     output=$(incus image list images:${a}/${b})
 fi
+# 宿主机为arm架构或未识别到要下载的容器链接时
 if [ -z "$image_download_url" ] && { echo "$output" | grep -q "${a}"; }; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
