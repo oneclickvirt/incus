@@ -14,21 +14,43 @@
 
 ## 说明文档
 
-国内(China)：
+国内(China Docs)：
 
 [https://virt.spiritlhl.net/](https://virt.spiritlhl.net/)
 
-国际(Global)：
+国际(English Docs)：
 
 [https://www.spiritlhl.net/en/](https://www.spiritlhl.net/en/)
 
 说明文档中 incus 分区内容
+
+## Introduce
+
+English Docs:
+
+[https://www.spiritlhl.net/en/](https://www.spiritlhl.net/en/)
+
+Description of the **incus** partition contents in the documentation
+
+Self-patching images sources:
+
+[https://github.com/oneclickvirt/incus_images](https://github.com/oneclickvirt/incus_images)
 
 ## 友链
 
 VPS融合怪测评脚本
 
 https://github.com/spiritLHLS/ecs
+
+## Sponsor
+
+Thanks to 
+
+<a href="https://dartnode.com/?via=server" target="_blank">
+  <img src="https://snaju.com/assets/img/logo_dark.svg" alt="ekire">
+</a>
+
+for providing support for images test.
 
 ## Stargazers over time
 
