@@ -24,6 +24,10 @@
 
 说明文档中 incus 分区内容
 
+自修补容器镜像源：
+
+[https://github.com/oneclickvirt/incus_images](https://github.com/oneclickvirt/incus_images)
+
 ## Introduce
 
 English Docs:
