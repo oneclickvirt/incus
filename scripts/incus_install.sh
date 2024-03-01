@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.01.22
+# 2024.03.01
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -121,6 +121,7 @@ install_package jq
 install_package uidmap
 install_package ipcalc
 install_package unzip
+install_package lsb_release
 # install_package lxcfs
 check_cdn_file
 rebuild_cloud_init
@@ -129,11 +130,14 @@ statistics_of_run-times
 
 # incus安装
 if ! command -v incus >/dev/null 2>&1; then
-    if [ ! -f /etc/apt/keyrings/ ]; then
-        mkdir -p /etc/apt/keyrings/
-    fi
-    curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-    sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+    os_info=$(lsb_release -a 2>/dev/null)
+    # 检查是否包含特定的版本信息
+    if [[ $os_info =~ "Ubuntu 20.04" || $os_info =~ "Ubuntu 22.04" || $os_info =~ "bullseye" || $os_info =~ "bookworm" ]]; then
+        if [ ! -f /etc/apt/keyrings/ ]; then
+            mkdir -p /etc/apt/keyrings/
+        fi
+        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+        sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
@@ -143,7 +147,10 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.asc
 
 EOF'
-    apt-get update
+        apt-get update
+        apt-get install -y incus
+    fi
+else
     apt-get install -y incus
 fi
 

@@ -4,11 +4,9 @@
 
 ## 更新
 
-2024.02.21
+2024.03.01
 
-- 替换不使用Github的Release的API而使用Raw链接进行自编译的容器列表的检索
-- 支持不指定系统版本号的宽泛化自修补系统的检索
-- 优化镜像源选择的各个判断
+- 确保符合 https://github.com/zabbly/incus?tab=readme-ov-file#availability 的要求才使用该源
 
 [更新日志](CHANGELOG.md)
 
