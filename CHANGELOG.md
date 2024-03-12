@@ -1,5 +1,9 @@
 ### 更新日志
 
+2024.03.01
+
+- 确保符合 https://github.com/zabbly/incus?tab=readme-ov-file#availability 的要求才使用该源
+
 2024.02.21
 
 - 替换不使用Github的Release的API而使用Raw链接进行自编译的容器列表的检索

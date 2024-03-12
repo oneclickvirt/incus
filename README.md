@@ -4,9 +4,9 @@
 
 ## 更新
 
-2024.03.01
+2024.03.12
 
-- 确保符合 https://github.com/zabbly/incus?tab=readme-ov-file#availability 的要求才使用该源
+- 调整重启网络的代码执行顺序
 
 [更新日志](CHANGELOG.md)
 
