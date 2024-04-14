@@ -88,7 +88,7 @@ cp /usr/local/bin/config.sh /root
 for ((a = 1; a <= "$2"; a++)); do
   incus copy "$1" "$1"$a
   name="$1"$a
-  # 容器SSH端口 20000起  外网nat端口 30000起 每个25个端口
+  # 容器SSH端口 20000起  外网nat端口 30000起 每个24个端口
   sshn=$((20000 + a))
   nat1=$((30000 + (a - 1) * 24 + 1))
   nat2=$((30000 + a * 24))
