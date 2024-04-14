@@ -1,5 +1,9 @@
 ### 更新日志
 
+2024.03.12
+
+- 调整重启网络的代码执行顺序
+
 2024.03.01
 
 - 确保符合 https://github.com/zabbly/incus?tab=readme-ov-file#availability 的要求才使用该源
