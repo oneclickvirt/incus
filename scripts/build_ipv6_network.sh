@@ -107,7 +107,7 @@ check_ipv6() {
             sleep 1
         done
     fi
-    echo $IPV6 >/usr/local/bin/lxd_check_ipv6
+    echo $IPV6 >/usr/local/bin/incus_check_ipv6
 }
 
 update_sysctl() {
@@ -208,10 +208,10 @@ _blue "宿主机的IPV6子网前缀为 $SUBNET_PREFIX"
 if [[ $use_iptables == n ]]; then
     # 用新增网络设备的方式映射IPV6网络
     install_package sipcalc
-    if [ ! -f /usr/local/bin/lxd_check_ipv6 ] || [ ! -s /usr/local/bin/lxd_check_ipv6 ] || [ "$(sed -e '/^[[:space:]]*$/d' /usr/local/bin/lxd_check_ipv6)" = "" ]; then
+    if [ ! -f /usr/local/bin/incus_check_ipv6 ] || [ ! -s /usr/local/bin/incus_check_ipv6 ] || [ "$(sed -e '/^[[:space:]]*$/d' /usr/local/bin/incus_check_ipv6)" = "" ]; then
         check_ipv6
     fi
-    IPV6=$(cat /usr/local/bin/lxd_check_ipv6)
+    IPV6=$(cat /usr/local/bin/incus_check_ipv6)
     # ifconfig ${ipv6_network_name} | awk '/inet6/{print $2}'
     if ip -f inet6 addr | grep -q "he-ipv6"; then
         ipv6_network_name="he-ipv6"
