@@ -320,15 +320,15 @@ vnstatd -v
 vnstati -v
 
 # 加装证书
-# wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
-# chmod 777 ~/.config/incus/client.crt
-# incus config trust add ~/.config/incus/client.crt
-# incus config set core.https_address :9969
-
-wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O /root/snap/lxd/common/config/client.crt
-chmod 777 /root/snap/lxd/common/config/client.crt
-incus config trust add /root/snap/lxd/common/config/client.crt
+wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
+chmod 777 ~/.config/incus/client.crt
+incus config trust add ~/.config/incus/client.crt
 incus config set core.https_address :9969
+
+# wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O /root/snap/lxd/common/config/client.crt
+# chmod 777 /root/snap/lxd/common/config/client.crt
+# incus config trust add /root/snap/lxd/common/config/client.crt
+# incus config set core.https_address :9969
 
 # 加载修改脚本
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/modify.sh -O /root/modify.sh
