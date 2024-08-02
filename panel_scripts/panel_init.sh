@@ -320,9 +320,14 @@ vnstatd -v
 vnstati -v
 
 # 加装证书
+# wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
+# chmod 777 ~/.config/incus/client.crt
+# incus config trust add ~/.config/incus/client.crt
+# incus config set core.https_address :8443
+
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
 chmod 777 ~/.config/incus/client.crt
-incus config trust add ~/.config/incus/client.crt
+incus config trust add-certificate ~/.config/incus/client.crt
 incus config set core.https_address :8443
 
 # wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O /root/snap/lxd/common/config/client.crt
