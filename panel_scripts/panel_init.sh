@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.02.12
+# 2024.08.02
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -247,7 +247,7 @@ curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incu
 incus config unset images.auto_update_interval
 incus config set images.auto_update_interval 0
 # 增加第三方镜像源
-incus remote add tuna-images https://mirrors.tuna.tsinghua.edu.cn/lxc-images/ --protocol=simplestreams --public>/dev/null 2>&1
+# incus remote add tuna-images https://mirrors.tuna.tsinghua.edu.cn/lxc-images/ --protocol=simplestreams --public>/dev/null 2>&1
 # 设置自动配置内网IPV6地址
 incus network set incusbr0 ipv6.address auto
 # 下载预制文件
@@ -320,13 +320,10 @@ vnstatd -v
 vnstati -v
 
 # 加装证书
-# wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
-# chmod 777 ~/.config/incus/client.crt
-# incus config trust add ~/.config/incus/client.crt
-# incus config set core.https_address :8443
-
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
 chmod 777 ~/.config/incus/client.crt
+# 双确认，部分版本切换了命令
+incus config trust add ~/.config/incus/client.crt
 incus config trust add-certificate ~/.config/incus/client.crt
 incus config set core.https_address :8443
 
