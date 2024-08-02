@@ -248,6 +248,7 @@ incus config unset images.auto_update_interval
 incus config set images.auto_update_interval 0
 # 增加第三方镜像源
 # incus remote add tuna-images https://mirrors.tuna.tsinghua.edu.cn/lxc-images/ --protocol=simplestreams --public>/dev/null 2>&1
+incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams>/dev/null 2>&1
 # 设置自动配置内网IPV6地址
 incus network set incusbr0 ipv6.address auto
 # 下载预制文件
