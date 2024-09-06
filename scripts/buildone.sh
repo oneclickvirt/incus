@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2024.02.21
+# 2024.09.06
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
@@ -97,7 +97,7 @@ if [ "$sys_bit" == "x86_64" ]; then
     # assets_count=$(echo "$response" | jq '.assets | length')
     # for ((i=0; i<assets_count; i++)); do
         # image_name=$(echo "$response" | jq -r ".assets[$i].name")
-    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/fixed_images.txt))
+    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/x86_64_fixed_images.txt))
     for image_name in "${self_fixed_images[@]}"; do
         if [ -z "${b}" ]; then
             # 若无版本号，则仅识别系统名字匹配第一个链接，放宽系统识别
