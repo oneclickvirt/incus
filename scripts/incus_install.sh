@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.03.12
+# 2024.12.07
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -36,16 +36,81 @@ else
     _green "Locale set to $utf8_locale"
 fi
 
+# By tailscale
+if [ -f /etc/os-release ]; then
+        # /etc/os-release populates a number of shell variables. We care about the following:
+        #  - ID: the short name of the OS (e.g. "debian", "freebsd")
+        #  - VERSION_ID: the numeric release version for the OS, if any (e.g. "18.04")
+        #  - VERSION_CODENAME: the codename of the OS release, if any (e.g. "buster")
+        #  - UBUNTU_CODENAME: if it exists, use instead of VERSION_CODENAME
+        . /etc/os-release
+        case "$ID" in
+                ubuntu|pop|neon|zorin)
+                        OS="ubuntu"
+                        if [ "${UBUNTU_CODENAME:-}" != "" ]; then
+                            VERSION="$UBUNTU_CODENAME"
+                        else
+                            VERSION="$VERSION_CODENAME"
+                        fi
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        PACKAGETYPE_UPDATE="apt update -y"
+                        PACKAGETYPE_REMOVE="apt remove -y"
+                        ;;
+                debian)
+                        OS="$ID"
+                        VERSION="$VERSION_CODENAME"
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        PACKAGETYPE_UPDATE="apt update -y"
+                        PACKAGETYPE_REMOVE="apt remove -y"
+                        ;;
+                kali)
+                        OS="debian"
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        PACKAGETYPE_UPDATE="apt update -y"
+                        PACKAGETYPE_REMOVE="apt remove -y"
+                        YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
+                        ;;
+                centos)
+                        OS="$ID"
+                        VERSION="$VERSION_ID"
+                        PACKAGETYPE="dnf"
+                        PACKAGETYPE_INSTALL="dnf install -y"
+                        PACKAGETYPE_REMOVE="dnf remove -y"
+                        if [ "$VERSION" = "7" ]; then
+                                PACKAGETYPE="yum"
+                        fi
+                        ;;
+                arch|archarm|endeavouros|blendos|garuda)
+                        OS="arch"
+                        VERSION="" # rolling release
+                        PACKAGETYPE="pacman"
+                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+                        PACKAGETYPE_UPDATE="pacman -Sy"
+                        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+                        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
+                        ;;
+                manjaro|manjaro-arm)
+                        OS="manjaro"
+                        VERSION="" # rolling release
+                        PACKAGETYPE="pacman"
+                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+                        PACKAGETYPE_UPDATE="pacman -Sy"
+                        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+                        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
+                        ;;
+        esac
+fi
+
 install_package() {
     package_name=$1
     if command -v $package_name >/dev/null 2>&1; then
         _green "$package_name has been installed"
         _green "$package_name 已经安装"
     else
-        apt-get install -y $package_name
-        if [ $? -ne 0 ]; then
-            apt-get install -y $package_name --fix-missing
-        fi
+        $PACKAGETYPE_INSTALL $package_name
         _green "$package_name has attempted to install"
         _green "$package_name 已尝试安装"
     fi
@@ -110,8 +175,7 @@ rebuild_cloud_init() {
     fi
 }
 
-apt-get update
-apt-get autoremove -y
+$PACKAGETYPE_UPDATE
 install_package wget
 install_package curl
 install_package sudo
@@ -125,7 +189,7 @@ install_package lsb_release
 # install_package lxcfs
 check_cdn_file
 rebuild_cloud_init
-apt-get remove cloud-init -y
+$PACKAGETYPE_REMOVE cloud-init
 statistics_of_run-times
 
 # incus安装
@@ -147,11 +211,17 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.asc
 
 EOF'
-        apt-get update
-        apt-get install -y incus
+        $PACKAGETYPE_UPDATE
+        $PACKAGETYPE_INSTALL incus
+    elif [[ $PACKAGETYPE == "pacman" ]]; then
+        $PACKAGETYPE_ONLY_REMOVE iptables
+        $PACKAGETYPE_INSTALL iptables-nft
+        $PACKAGETYPE_INSTALL incus
+        systemctl enable incus --now
     fi
 else
-    apt-get install -y incus
+    $PACKAGETYPE_INSTALL incus
+    systemctl enable incus --now
 fi
 
 # 读取母鸡配置
@@ -207,7 +277,7 @@ if [[ $status == false ]]; then
             STORAGE_BACKEND=$backend
             if [ "$STORAGE_BACKEND" = "dir" ]; then
                 if [ ! -f /usr/local/bin/incus_reboot ];then
-                    install_package btrfs-progs
+                    $PACKAGETYPE_INSTALL btrfs-progs
                     _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
                     _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
                     echo "" > /usr/local/bin/incus_reboot
@@ -240,7 +310,7 @@ if [[ $status == false ]]; then
 else
     echo "btrfs" >/usr/local/bin/incus_storage_type
 fi
-install_package uidmap
+$PACKAGETYPE_INSTALL uidmap
 
 # 虚拟内存设置
 curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/swap2.sh" -o swap2.sh && chmod +x swap2.sh

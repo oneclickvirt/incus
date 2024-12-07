@@ -8,9 +8,65 @@
 # 如果 外网起端口 外网止端口 都设置为0则不做区间外网端口映射了，只映射基础的SSH端口，注意不能为空，不进行映射需要设置为0
 
 # 创建容器
+
+# By tailscale
+if [ -f /etc/os-release ]; then
+        # /etc/os-release populates a number of shell variables. We care about the following:
+        #  - ID: the short name of the OS (e.g. "debian", "freebsd")
+        #  - VERSION_ID: the numeric release version for the OS, if any (e.g. "18.04")
+        #  - VERSION_CODENAME: the codename of the OS release, if any (e.g. "buster")
+        #  - UBUNTU_CODENAME: if it exists, use instead of VERSION_CODENAME
+        . /etc/os-release
+        case "$ID" in
+                ubuntu|pop|neon|zorin)
+                        OS="ubuntu"
+                        if [ "${UBUNTU_CODENAME:-}" != "" ]; then
+                            VERSION="$UBUNTU_CODENAME"
+                        else
+                            VERSION="$VERSION_CODENAME"
+                        fi
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        ;;
+                debian)
+                        OS="$ID"
+                        VERSION="$VERSION_CODENAME"
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        ;;
+                kali)
+                        OS="debian"
+                        PACKAGETYPE="apt"
+                        PACKAGETYPE_INSTALL="apt install -y"
+                        YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
+                        ;;
+                centos)
+                        OS="$ID"
+                        VERSION="$VERSION_ID"
+                        PACKAGETYPE="dnf"
+                        PACKAGETYPE_INSTALL="dnf install -y"
+                        if [ "$VERSION" = "7" ]; then
+                                PACKAGETYPE="yum"
+                        fi
+                        ;;
+                arch|archarm|endeavouros|blendos|garuda)
+                        OS="arch"
+                        VERSION="" # rolling release
+                        PACKAGETYPE="pacman"
+                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+                        ;;
+                manjaro|manjaro-arm)
+                        OS="manjaro"
+                        VERSION="" # rolling release
+                        PACKAGETYPE="pacman"
+                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+                        ;;
+        esac
+fi
+
 cd /root >/dev/null 2>&1
 if ! command -v jq; then
-    apt-get install jq -y
+    $PACKAGETYPE_INSTALL jq
 fi
 
 check_china() {
