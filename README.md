@@ -8,7 +8,8 @@
 
 2025.01.30
 
-- 增加无人值守安装的命令，使用```export noninteractive=true```后强制无需重启无需手动输入进行安装
+- 增加无人值守安装的命令，使用```export noninteractive=true```后强制无需重启无需手动输入进行安装。
+- 修复在Ubuntu上会自动跳过安装的BUG。
 
 [更新日志](CHANGELOG.md)
 
