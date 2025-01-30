@@ -195,11 +195,13 @@ statistics_of_run-times
 # incus安装
 if ! command -v incus >/dev/null 2>&1; then
     os_info=$(lsb_release -a 2>/dev/null)
-    # 检查是否包含特定的版本信息
+    # Ubuntu/Debian 系统的安装流程
     if [[ $os_info =~ "Ubuntu 20.04" || $os_info =~ "Ubuntu 22.04" || $os_info =~ "bullseye" || $os_info =~ "bookworm" ]]; then
-        if [ ! -f /etc/apt/keyrings/ ]; then
+        # 检查并创建密钥目录
+        if [ ! -d /etc/apt/keyrings/ ]; then
             mkdir -p /etc/apt/keyrings/
         fi
+        # 添加仓库和密钥
         curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
         sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
@@ -208,11 +210,12 @@ URIs: https://pkgs.zabbly.com/incus/stable
 Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
 Components: main
 Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
-
+Signed-By: /etc/apt/keyrights/zabbly.asc
 EOF'
         $PACKAGETYPE_UPDATE
         $PACKAGETYPE_INSTALL incus
+        systemctl enable incus --now
+    # Arch Linux 系统的安装流程
     elif [[ $PACKAGETYPE == "pacman" ]]; then
         $PACKAGETYPE_ONLY_REMOVE iptables
         $PACKAGETYPE_INSTALL iptables-nft
@@ -220,8 +223,7 @@ EOF'
         systemctl enable incus --now
     fi
 else
-    $PACKAGETYPE_INSTALL incus
-    systemctl enable incus --now
+    echo "incus is already installed"
 fi
 
 # 读取母鸡配置
