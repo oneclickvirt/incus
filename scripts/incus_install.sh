@@ -292,7 +292,7 @@ if [[ $status == false ]]; then
         if command -v $backend >/dev/null; then
             STORAGE_BACKEND=$backend
             if [ "$STORAGE_BACKEND" = "dir" ]; then
-                if [ ! -f /usr/local/bin/incus_reboot ];then
+                if [ "${noninteractive:-false}" = false ] && [ ! -f /usr/local/bin/incus_reboot ]; then
                     $PACKAGETYPE_INSTALL btrfs-progs
                     _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
                     _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
