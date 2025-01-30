@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2024.09.06
+# 2025.01.30
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
@@ -127,7 +127,7 @@ sysarch="$(uname -m)"
 case "${sysarch}" in
 "x86_64" | "x86" | "amd64" | "x64") sys_bit="x86_64" ;;
 "i386" | "i686") sys_bit="i686" ;;
-"aarch64" | "armv8" | "armv8l") sys_bit="aarch64" ;;
+"aarch64" | "armv8" | "armv8l") sys_bit="arm64" ;;
 "armv7l") sys_bit="armv7l" ;;
 "s390x") sys_bit="s390x" ;;
     #     "riscv64") sys_bit="riscv64";;
@@ -144,8 +144,7 @@ check_cdn_file
 # 处理镜像是否存在，是否使用自编译、官方、第三方镜像的问题
 image_download_url=""
 fixed_system=false
-if [ "$sys_bit" == "x86_64" ]; then
-    # 暂时仅支持x86_64的架构使用自编译的第三方包
+if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
     # response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
     # if [ $? -ne 0 ]; then
     #     response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://githubapi.spiritlhl.top/repos/oneclickvirt/incus_images/releases/tags/${a}")
@@ -153,7 +152,7 @@ if [ "$sys_bit" == "x86_64" ]; then
     # assets_count=$(echo "$response" | jq '.assets | length')
     # for ((i=0; i<assets_count; i++)); do
         # image_name=$(echo "$response" | jq -r ".assets[$i].name")
-    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/x86_64_fixed_images.txt))
+    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt))
     for image_name in "${self_fixed_images[@]}"; do
         if [ -z "${b}" ]; then
             # 若无版本号，则仅识别系统名字匹配第一个链接，放宽系统识别
@@ -200,7 +199,7 @@ if [ "$sys_bit" == "x86_64" ]; then
 else
     output=$(incus image list images:${a}/${b})
 fi
-# 宿主机为arm架构或未识别到要下载的容器链接时
+# 宿主机未识别到要下载的容器链接时
 if [ -z "$image_download_url" ]; then
     system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     echo "A matching image exists and will be created using images:${system}"
@@ -208,13 +207,13 @@ if [ -z "$image_download_url" ]; then
     fixed_system=false
 fi
 if [ -z "$image_download_url" ] && [ -z "$system" ]; then
-    system=$(incus image list tuna-images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna=false
     else
         if echo "$system" | grep -q "${a}"; then
-            echo "A matching image exists and will be created using tuna-images:${system}"
-            echo "匹配的镜像存在，将使用 tuna-images:${system} 进行创建"
+            echo "A matching image exists and will be created using opsmaru:${system}"
+            echo "匹配的镜像存在，将使用 opsmaru:${system} 进行创建"
             status_tuna=true
             fixed_system=false
         else
@@ -223,10 +222,10 @@ if [ -z "$image_download_url" ] && [ -z "$system" ]; then
     fi
     if [ "$status_tuna" = false ]; then
         echo "No matching image found, please execute"
-        echo "incus image list images:system/version_number OR incus image list tuna-images:system/version_number"
+        echo "incus image list images:system/version_number OR incus image list opsmaru:system/version_number"
         echo "Check if a corresponding image exists"
         echo "未找到匹配的镜像，请执行"
-        echo "incus image list images:系统/版本号 或 incus image list tuna-images:系统/版本号"
+        echo "incus image list images:系统/版本号 或 incus image list opsmaru:系统/版本号"
         echo "查询是否存在对应镜像"
         exit 1
     fi
@@ -235,7 +234,7 @@ fi
 # 开始创建容器
 rm -rf "$name"
 if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-    incus init tuna-images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+    incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
 elif [ -z "$image_download_url" ]; then
     incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
 else

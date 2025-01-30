@@ -31,7 +31,7 @@ check_china
 rm -rf log
 incus init images:debian/11 "$1" -c limits.cpu=1 -c limits.memory=128MiB
 if [ $? -ne 0 ]; then
-  incus init tuna-images:debian/11 "$1" -c limits.cpu=1 -c limits.memory=128MiB
+    incus init opsmaru:debian/11 "$1" -c limits.cpu=1 -c limits.memory=128MiB
 fi
 if [ -f /usr/local/bin/incus_storage_type ]; then
     storage_type=$(cat /usr/local/bin/incus_storage_type)
