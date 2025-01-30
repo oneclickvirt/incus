@@ -6,9 +6,9 @@
 
 ## 更新
 
-2024.06.05
+2025.01.30
 
-- 更新SSH设置规则，适配Ubuntu24
+- 增加无人值守安装的命令，使用```export noninteractive=true```后强制无需重启无需手动输入进行安装
 
 [更新日志](CHANGELOG.md)
 
