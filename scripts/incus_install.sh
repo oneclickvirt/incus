@@ -221,6 +221,9 @@ EOF'
         $PACKAGETYPE_INSTALL iptables-nft
         $PACKAGETYPE_INSTALL incus
         systemctl enable incus --now
+    else
+        $PACKAGETYPE_INSTALL incus
+        systemctl enable incus --now
     fi
 else
     echo "incus is already installed"
