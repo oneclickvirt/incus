@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.08.02
+# 2025.02.02
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -108,8 +108,26 @@ rebuild_cloud_init() {
     fi
 }
 
-apt-get update
-apt-get autoremove -y
+install_via_zabbly() {
+    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+    mkdir -p /etc/apt/keyrings/
+    if ! curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint; then
+        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+    fi
+    cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF
+    apt update -y
+    apt install -y incus
+}
+
+$PACKAGETYPE_UPDATE
 install_package wget
 install_package curl
 install_package sudo
@@ -123,33 +141,106 @@ install_package lsb_release
 # install_package lxcfs
 check_cdn_file
 rebuild_cloud_init
-apt-get remove cloud-init -y
+$PACKAGETYPE_REMOVE cloud-init
 statistics_of_run-times
-
-# incus安装
+# 安装incus
 if ! command -v incus >/dev/null 2>&1; then
-    os_info=$(lsb_release -a 2>/dev/null)
-    # 检查是否包含特定的版本信息
-    if [[ $os_info =~ "Ubuntu 20.04" || $os_info =~ "Ubuntu 22.04" || $os_info =~ "bullseye" || $os_info =~ "bookworm" ]]; then
-        if [ ! -f /etc/apt/keyrings/ ]; then
-            mkdir -p /etc/apt/keyrings/
+    echo "未检测到 incus，开始自动安装... | incus not found, starting installation..."
+    # Alpine Linux 系统
+    if [ -f /etc/alpine-release ]; then
+        echo "检测到 Alpine Linux | Detected Alpine Linux"
+        echo "取消注释 /etc/apk/repositories 中 edge main 与 edge community 仓库 | Uncommenting edge main and edge community repositories in /etc/apk/repositories"
+        sed -i 's/^#\s*\(https:\/\/dl-cdn.alpinelinux.org\/alpine\/edge\/main\)/\1/' /etc/apk/repositories
+        sed -i 's/^#\s*\(https:\/\/dl-cdn.alpinelinux.org\/alpine\/edge\/community\)/\1/' /etc/apk/repositories
+        apk update
+        echo "安装 incus 和 incus-client | Installing incus and incus-client"
+        apk add incus incus-client
+        read -p "是否需要安装虚拟机支持（安装 incus-vm）? [y/N] | Install virtual machine support (install incus-vm)? [y/N] " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            apk add incus-vm
         fi
-        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-        sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/stable
-Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
-
-EOF'
-        apt-get update
-        apt-get install -y incus
+        echo "添加 incus 服务到系统启动，并启动服务 | Adding incus service to system startup and starting service"
+        rc-update add incusd
+        rc-service incusd start
+    # Debian/Ubuntu 系统
+    elif [ -f /etc/debian_version ]; then
+        . /etc/os-release
+        echo "检测到 $NAME $VERSION_ID | Detected $NAME $VERSION_ID"
+        if [[ "$NAME" == "Ubuntu" ]]; then
+            if dpkg --compare-versions "$VERSION_ID" ge "24.04"; then
+                echo "使用 Ubuntu 原生 incus 包（24.04 LTS 及以上） | Using Ubuntu native incus package (24.04 LTS and later)"
+                apt update
+                apt install -y incus || install_via_zabbly
+            else
+                install_via_zabbly
+            fi
+        else
+            if [[ "$VERSION_CODENAME" == "bookworm" ]]; then
+                echo "使用 Debian 12 (bookworm) 的 backports 包安装 incus | Installing incus from backports for Debian 12 (bookworm)"
+                apt update
+                apt install -y incus/bookworm-backports || install_via_zabbly
+            else
+                echo "使用 Debian 原生 incus 包（适用于 testing/unstable） | Installing native incus package for Debian (testing/unstable)"
+                apt update
+                apt install -y incus || install_via_zabbly
+            fi
+        fi
+        systemctl enable incus --now
+    # Arch Linux 系统
+    elif [ -f /etc/arch-release ]; then
+        echo "检测到 Arch Linux | Detected Arch Linux"
+        echo "移除 iptables（如果存在）并安装 iptables-nft 与 incus | Removing iptables (if exists) and installing iptables-nft and incus"
+        pacman -R --noconfirm iptables
+        pacman -Syu --noconfirm iptables-nft incus
+        systemctl enable incus --now
+    # Gentoo 系统
+    elif [ -f /etc/gentoo-release ]; then
+        echo "检测到 Gentoo | Detected Gentoo"
+        echo "使用 emerge 安装 incus | Installing incus using emerge"
+        emerge -av app-containers/incus
+    # RPM 系统（例如 Rocky Linux）
+    elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ]; then
+        echo "检测到 RPM 系统（如 Rocky Linux） | Detected RPM-based system (e.g., Rocky Linux)"
+        echo "安装 epel-release，并启用 COPR 仓库及 CodeReady Builder (CRB) | Installing epel-release, enabling COPR repository and CodeReady Builder (CRB)"
+        dnf -y install epel-release
+        dnf copr enable -y neil/incus
+        dnf config-manager --set-enabled crb
+        echo "安装 incus 与 incus-tools | Installing incus and incus-tools"
+        dnf install -y incus incus-tools
+        systemctl enable incus --now
+    # Void Linux 系统
+    elif [ -f /etc/void-release ]; then
+        echo "检测到 Void Linux | Detected Void Linux"
+        echo "使用 xbps 安装 incus 与 incus-client | Installing incus and incus-client using xbps"
+        xbps-install -S incus incus-client
+        echo "启用并启动 incus 服务 | Enabling and starting incus service"
+        ln -s /etc/sv/incus /var/service
+        ln -s /etc/sv/incus-user /var/service
+        sv up incus
+        sv up incus-user
+    else
+        echo "未识别的系统，尝试使用常见包管理器安装 incus | Unrecognized system, trying common package managers to install incus"
+        if command -v apt >/dev/null 2>&1; then
+            apt update
+            apt install -y incus
+            systemctl enable incus --now
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y incus
+            systemctl enable incus --now
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Syu --noconfirm incus
+            systemctl enable incus --now
+        else
+            $PACKAGETYPE_INSTALL incus
+            if [[ $? -ne 0 ]]; then
+                echo "无法识别包管理器，请手动安装 incus | Unable to recognize package manager, please install incus manually."
+            else
+                systemctl enable incus --now
+            fi
+        fi
     fi
 else
-    apt-get install -y incus
+    echo "incus 已经安装 | incus is already installed"
 fi
 
 # 读取母鸡配置

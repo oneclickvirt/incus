@@ -38,70 +38,70 @@ fi
 
 # By tailscale
 if [ -f /etc/os-release ]; then
-        # /etc/os-release populates a number of shell variables. We care about the following:
-        #  - ID: the short name of the OS (e.g. "debian", "freebsd")
-        #  - VERSION_ID: the numeric release version for the OS, if any (e.g. "18.04")
-        #  - VERSION_CODENAME: the codename of the OS release, if any (e.g. "buster")
-        #  - UBUNTU_CODENAME: if it exists, use instead of VERSION_CODENAME
-        . /etc/os-release
-        case "$ID" in
-                ubuntu|pop|neon|zorin)
-                        OS="ubuntu"
-                        if [ "${UBUNTU_CODENAME:-}" != "" ]; then
-                            VERSION="$UBUNTU_CODENAME"
-                        else
-                            VERSION="$VERSION_CODENAME"
-                        fi
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        PACKAGETYPE_UPDATE="apt update -y"
-                        PACKAGETYPE_REMOVE="apt remove -y"
-                        ;;
-                debian)
-                        OS="$ID"
-                        VERSION="$VERSION_CODENAME"
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        PACKAGETYPE_UPDATE="apt update -y"
-                        PACKAGETYPE_REMOVE="apt remove -y"
-                        ;;
-                kali)
-                        OS="debian"
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        PACKAGETYPE_UPDATE="apt update -y"
-                        PACKAGETYPE_REMOVE="apt remove -y"
-                        YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
-                        ;;
-                centos)
-                        OS="$ID"
-                        VERSION="$VERSION_ID"
-                        PACKAGETYPE="dnf"
-                        PACKAGETYPE_INSTALL="dnf install -y"
-                        PACKAGETYPE_REMOVE="dnf remove -y"
-                        if [ "$VERSION" = "7" ]; then
-                                PACKAGETYPE="yum"
-                        fi
-                        ;;
-                arch|archarm|endeavouros|blendos|garuda)
-                        OS="arch"
-                        VERSION="" # rolling release
-                        PACKAGETYPE="pacman"
-                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
-                        PACKAGETYPE_UPDATE="pacman -Sy"
-                        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
-                        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
-                        ;;
-                manjaro|manjaro-arm)
-                        OS="manjaro"
-                        VERSION="" # rolling release
-                        PACKAGETYPE="pacman"
-                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
-                        PACKAGETYPE_UPDATE="pacman -Sy"
-                        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
-                        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
-                        ;;
-        esac
+    # /etc/os-release populates a number of shell variables. We care about the following:
+    #  - ID: the short name of the OS (e.g. "debian", "freebsd")
+    #  - VERSION_ID: the numeric release version for the OS, if any (e.g. "18.04")
+    #  - VERSION_CODENAME: the codename of the OS release, if any (e.g. "buster")
+    #  - UBUNTU_CODENAME: if it exists, use instead of VERSION_CODENAME
+    . /etc/os-release
+    case "$ID" in
+    ubuntu | pop | neon | zorin)
+        OS="ubuntu"
+        if [ "${UBUNTU_CODENAME:-}" != "" ]; then
+            VERSION="$UBUNTU_CODENAME"
+        else
+            VERSION="$VERSION_CODENAME"
+        fi
+        PACKAGETYPE="apt"
+        PACKAGETYPE_INSTALL="apt install -y"
+        PACKAGETYPE_UPDATE="apt update -y"
+        PACKAGETYPE_REMOVE="apt remove -y"
+        ;;
+    debian)
+        OS="$ID"
+        VERSION="$VERSION_CODENAME"
+        PACKAGETYPE="apt"
+        PACKAGETYPE_INSTALL="apt install -y"
+        PACKAGETYPE_UPDATE="apt update -y"
+        PACKAGETYPE_REMOVE="apt remove -y"
+        ;;
+    kali)
+        OS="debian"
+        PACKAGETYPE="apt"
+        PACKAGETYPE_INSTALL="apt install -y"
+        PACKAGETYPE_UPDATE="apt update -y"
+        PACKAGETYPE_REMOVE="apt remove -y"
+        YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
+        ;;
+    centos)
+        OS="$ID"
+        VERSION="$VERSION_ID"
+        PACKAGETYPE="dnf"
+        PACKAGETYPE_INSTALL="dnf install -y"
+        PACKAGETYPE_REMOVE="dnf remove -y"
+        if [ "$VERSION" = "7" ]; then
+            PACKAGETYPE="yum"
+        fi
+        ;;
+    arch | archarm | endeavouros | blendos | garuda)
+        OS="arch"
+        VERSION="" # rolling release
+        PACKAGETYPE="pacman"
+        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+        PACKAGETYPE_UPDATE="pacman -Sy"
+        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
+        ;;
+    manjaro | manjaro-arm)
+        OS="manjaro"
+        VERSION="" # rolling release
+        PACKAGETYPE="pacman"
+        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+        PACKAGETYPE_UPDATE="pacman -Sy"
+        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+        PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
+        ;;
+    esac
 fi
 
 install_package() {
@@ -175,6 +175,25 @@ rebuild_cloud_init() {
     fi
 }
 
+install_via_zabbly() {
+    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+    mkdir -p /etc/apt/keyrings/
+    if ! curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint; then
+        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+    fi
+    cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF
+    apt update -y
+    apt install -y incus
+}
+
 $PACKAGETYPE_UPDATE
 install_package wget
 install_package curl
@@ -191,8 +210,7 @@ check_cdn_file
 rebuild_cloud_init
 $PACKAGETYPE_REMOVE cloud-init
 statistics_of_run-times
-
-# incus安装
+# 安装incus
 if ! command -v incus >/dev/null 2>&1; then
     echo "未检测到 incus，开始自动安装... | incus not found, starting installation..."
     # Alpine Linux 系统
@@ -215,75 +233,26 @@ if ! command -v incus >/dev/null 2>&1; then
     elif [ -f /etc/debian_version ]; then
         . /etc/os-release
         echo "检测到 $NAME $VERSION_ID | Detected $NAME $VERSION_ID"
-        # 针对 Ubuntu 系统
         if [[ "$NAME" == "Ubuntu" ]]; then
             if dpkg --compare-versions "$VERSION_ID" ge "24.04"; then
                 echo "使用 Ubuntu 原生 incus 包（24.04 LTS 及以上） | Using Ubuntu native incus package (24.04 LTS and later)"
                 apt update
-                apt install -y incus
-                if [[ $? -ne 0 ]]; then
-                    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
-                    mkdir -p /etc/apt/keyrings/
-                    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-                    sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/stable
-Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
-
-EOF'
-                    apt update -y
-                    apt install -y incus
-                fi
+                apt install -y incus || install_via_zabbly
             else
-                echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
-                mkdir -p /etc/apt/keyrings/
-                curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-                sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/stable
-Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
-
-EOF'
-                apt update
-                apt install -y incus
+                install_via_zabbly
             fi
         else
-            # 针对 Debian 系统
             if [[ "$VERSION_CODENAME" == "bookworm" ]]; then
                 echo "使用 Debian 12 (bookworm) 的 backports 包安装 incus | Installing incus from backports for Debian 12 (bookworm)"
                 apt update
-                apt install -y incus/bookworm-backports
+                apt install -y incus/bookworm-backports || install_via_zabbly
             else
                 echo "使用 Debian 原生 incus 包（适用于 testing/unstable） | Installing native incus package for Debian (testing/unstable)"
                 apt update
-                apt install -y incus
+                apt install -y incus || install_via_zabbly
             fi
-            if [[ $? -ne 0 ]]; then
-                    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
-                    mkdir -p /etc/apt/keyrings/
-                    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-                    sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
-Enabled: yes
-Types: deb
-URIs: https://pkgs.zabbly.com/incus/stable
-Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
-
-EOF'
-                    apt update -y
-                    apt install -y incus
-            fi
-            systemctl enable incus --now
+        fi
+        systemctl enable incus --now
     # Arch Linux 系统
     elif [ -f /etc/arch-release ]; then
         echo "检测到 Arch Linux | Detected Arch Linux"
@@ -296,10 +265,6 @@ EOF'
         echo "检测到 Gentoo | Detected Gentoo"
         echo "使用 emerge 安装 incus | Installing incus using emerge"
         emerge -av app-containers/incus
-        read -p "是否需要安装虚拟机支持（安装 app-emulation/qemu）? [y/N] | Install virtual machine support (install app-emulation/qemu)? [y/N] " answer
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            emerge -av app-emulation/qemu
-        fi
     # RPM 系统（例如 Rocky Linux）
     elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ]; then
         echo "检测到 RPM 系统（如 Rocky Linux） | Detected RPM-based system (e.g., Rocky Linux)"
@@ -315,10 +280,6 @@ EOF'
         echo "检测到 Void Linux | Detected Void Linux"
         echo "使用 xbps 安装 incus 与 incus-client | Installing incus and incus-client using xbps"
         xbps-install -S incus incus-client
-        read -p "是否需要安装虚拟机支持（安装 incus-vm）? [y/N] | Install virtual machine support (install incus-vm)? [y/N] " answer
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            xbps-install -S incus-vm
-        fi
         echo "启用并启动 incus 服务 | Enabling and starting incus service"
         ln -s /etc/sv/incus /var/service
         ln -s /etc/sv/incus-user /var/service
@@ -349,6 +310,7 @@ else
     echo "incus 已经安装 | incus is already installed"
 fi
 
+
 # 读取母鸡配置
 # 函数：获取可用磁盘空间（GB为单位）
 get_available_space() {
@@ -361,8 +323,8 @@ get_available_space() {
 if [ "${noninteractive:-false}" = true ]; then
     # 获取可用空间并减去1GB用于swap
     available_space=$(get_available_space)
-    memory_nums=1024  # 1GB作为swap空间
-    disk_nums=$((available_space - 1))  # 剩余空间用作存储池
+    memory_nums=1024                   # 1GB作为swap空间
+    disk_nums=$((available_space - 1)) # 剩余空间用作存储池
 else
     while true; do
         _green "How much virtual memory does the host need to open? (Virtual memory SWAP will occupy hard disk space, calculate by yourself, note that it is MB as the unit, need 1G virtual memory then enter 1024):"
@@ -425,7 +387,7 @@ else
                         $PACKAGETYPE_INSTALL btrfs-progs
                         _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
                         _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
-                        echo "" > /usr/local/bin/incus_reboot
+                        echo "" >/usr/local/bin/incus_reboot
                         exit 1
                     fi
                     _green "Infinite storage pool size using default dir type due to no btrfs"
@@ -466,7 +428,7 @@ incus config unset images.auto_update_interval
 incus config set images.auto_update_interval 0
 # 增加第三方镜像链接避免官方镜像失联
 # incus remote add tuna-images https://mirrors.tuna.tsinghua.edu.cn/lxc-images/ --protocol=simplestreams --public>/dev/null 2>&1
-incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams>/dev/null 2>&1
+incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
 # 设置自动配置内网IPV6地址
 incus network set incusbr0 ipv6.address auto
 # 下载预制文件
