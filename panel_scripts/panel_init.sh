@@ -110,18 +110,19 @@ rebuild_cloud_init() {
 
 install_via_zabbly() {
     echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+    # 创建存放 apt 密钥的目录
     mkdir -p /etc/apt/keyrings/
-    if ! curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint; then
-        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-    fi
-    cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+    # 下载并转换公钥为 gpg 格式
+    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+    # 配置 apt 源，引用转换后的公钥文件
+    cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
 Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
 Components: main
 Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
+Signed-By: /etc/apt/keyrings/zabbly.gpg
 EOF
     apt update -y
     apt install -y incus
@@ -295,11 +296,11 @@ if [[ $status == false ]]; then
         if command -v $backend >/dev/null; then
             STORAGE_BACKEND=$backend
             if [ "$STORAGE_BACKEND" = "dir" ]; then
-                if [ ! -f /usr/local/bin/incus_reboot ];then
+                if [ ! -f /usr/local/bin/incus_reboot ]; then
                     install_package btrfs-progs
                     _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
                     _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
-                    echo "" > /usr/local/bin/incus_reboot
+                    echo "" >/usr/local/bin/incus_reboot
                     exit 1
                 fi
                 _green "Infinite storage pool size using default dir type due to no btrfs"
@@ -339,7 +340,7 @@ incus config unset images.auto_update_interval
 incus config set images.auto_update_interval 0
 # 增加第三方镜像源
 # incus remote add tuna-images https://mirrors.tuna.tsinghua.edu.cn/lxc-images/ --protocol=simplestreams --public>/dev/null 2>&1
-incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams>/dev/null 2>&1
+incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
 # 设置自动配置内网IPV6地址
 incus network set incusbr0 ipv6.address auto
 # 下载预制文件
@@ -395,7 +396,7 @@ install_package gcc
 install_package libc6-dev
 install_package libsqlite3-0
 install_package libsqlite3-dev
-install_package libgd3 
+install_package libgd3
 install_package libgd-dev
 cd /usr/src
 wget https://humdi.net/vnstat/vnstat-2.11.tar.gz

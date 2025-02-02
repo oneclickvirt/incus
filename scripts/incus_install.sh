@@ -177,18 +177,19 @@ rebuild_cloud_init() {
 
 install_via_zabbly() {
     echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+    # 创建存放 apt 密钥的目录
     mkdir -p /etc/apt/keyrings/
-    if ! curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint; then
-        curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-    fi
-    cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+    # 下载并转换公钥为 gpg 格式
+    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+    # 配置 apt 源，引用转换后的公钥文件
+    cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
 Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
 Components: main
 Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/zabbly.asc
+Signed-By: /etc/apt/keyrings/zabbly.gpg
 EOF
     apt update -y
     apt install -y incus
@@ -309,7 +310,6 @@ if ! command -v incus >/dev/null 2>&1; then
 else
     echo "incus 已经安装 | incus is already installed"
 fi
-
 
 # 读取母鸡配置
 # 函数：获取可用磁盘空间（GB为单位）
