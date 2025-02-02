@@ -223,10 +223,6 @@ if ! command -v incus >/dev/null 2>&1; then
         apk update
         echo "安装 incus 和 incus-client | Installing incus and incus-client"
         apk add incus incus-client
-        read -p "是否需要安装虚拟机支持（安装 incus-vm）? [y/N] | Install virtual machine support (install incus-vm)? [y/N] " answer
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            apk add incus-vm
-        fi
         echo "添加 incus 服务到系统启动，并启动服务 | Adding incus service to system startup and starting service"
         rc-update add incusd
         rc-service incusd start
