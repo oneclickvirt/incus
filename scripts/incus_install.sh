@@ -237,7 +237,6 @@ Signed-By: /etc/apt/keyrings/zabbly.asc
 EOF'
                     apt update -y
                     apt install -y incus
-                    fi
                 fi
             else
                 echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
@@ -267,12 +266,24 @@ EOF'
                 apt update
                 apt install -y incus
             fi
-            read -p "是否需要安装虚拟机支持（安装 qemu-system 与 incus-tools）? [y/N] | Install virtual machine support (install qemu-system and incus-tools)? [y/N] " answer
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                apt install -y qemu-system incus-tools
+            if [[ $? -ne 0 ]]; then
+                    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+                    mkdir -p /etc/apt/keyrings/
+                    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+                    sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+
+EOF'
+                    apt update -y
+                    apt install -y incus
             fi
-        fi
-        systemctl enable incus --now
+            systemctl enable incus --now
     # Arch Linux 系统
     elif [ -f /etc/arch-release ]; then
         echo "检测到 Arch Linux | Detected Arch Linux"
