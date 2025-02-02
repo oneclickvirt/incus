@@ -221,29 +221,40 @@ if ! command -v incus >/dev/null 2>&1; then
                 echo "使用 Ubuntu 原生 incus 包（24.04 LTS 及以上） | Using Ubuntu native incus package (24.04 LTS and later)"
                 apt update
                 apt install -y incus
-                read -p "是否需要安装虚拟机支持（安装 qemu-system 与 incus-tools）? [y/N] | Install virtual machine support (install qemu-system and incus-tools)? [y/N] " answer
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    apt install -y qemu-system incus-tools
+                if [[ $? -ne 0 ]]; then
+                    echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
+                    mkdir -p /etc/apt/keyrings/
+                    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+                    sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+
+EOF'
+                    apt update -y
+                    apt install -y incus
+                    fi
                 fi
             else
                 echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
                 mkdir -p /etc/apt/keyrings/
-                curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-                cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources
+                curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --show-keys --fingerprint || curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+                sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
-Suites: ${VERSION_CODENAME}
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
 Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.asc
-EOF
+
+EOF'
                 apt update
                 apt install -y incus
-                read -p "是否需要安装虚拟机支持（安装 qemu-system 与 incus-tools）? [y/N] | Install virtual machine support (install qemu-system and incus-tools)? [y/N] " answer
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    apt install -y qemu-system incus-tools
-                fi
             fi
         else
             # 针对 Debian 系统
