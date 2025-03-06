@@ -2,7 +2,7 @@
 
 [![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Foneclickvirt%2Fincus&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=hits&edge_flat=false)](https://hits.seeyoufarm.com)
 
-[<img src="https://api.gitsponsors.com/api/badge/img?id=743472662" height="20">](https://api.gitsponsors.com/api/badge/link?p=LTA+W4I01HReSwp4tmstSLhpNnipOMsGC/DMt+kEV8dKBozpfBs7EsAS06+dbxlS3dJQfOjhCOi/vhxRqzpk5JTqCd1sKJRVQ8pugRG+B70XUrFDHrL+5BlCp7oCGpmjeODhd6Wqw85AGCFiMj2tYQ==)
+
 
 ## 更新
 
