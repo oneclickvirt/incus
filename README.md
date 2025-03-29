@@ -1,14 +1,12 @@
 # incus
 
-[![Hits](https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Foneclickvirt%2Fincus&count_bg=%2379C83D&title_bg=%23555555&icon=&icon_color=%23E7E7E7&title=hits&edge_flat=false)](https://hits.seeyoufarm.com)
-
-
+[![Hits](https://hits.spiritlhl.net/incus.svg?action=hit&title=Hits&title_bg=%23555555&count_bg=%230eecf8&edge_flat=false)](https://hits.spiritlhl.net)
 
 ## 更新
 
-2025.02.23
+2025.03.29
 
-- 去除对 cip.cc 的依赖
+- 修复Hits徽章访问量统计，使用 https://github.com/oneclickvirt/hitscounter
 
 [更新日志](CHANGELOG.md)
 
