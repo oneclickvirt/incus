@@ -42,11 +42,13 @@ Self-patching images sources:
 
 VPS融合怪测评脚本
 
+https://github.com/oneclickvirt/ecs
+
 https://github.com/spiritLHLS/ecs
 
 ## Sponsor
 
-Thanks to [dartnode](https://dartnode.com/?via=server) for providing support for images compiling.
+Thanks to [dartnode](https://dartnode.com/?via=server) for providing support for images compiling test.
 
 <a href="https://dartnode.com/?via=server" target="_blank">
   <img src="https://snaju.com/assets/img/logo_dark.svg" alt="ekire">
