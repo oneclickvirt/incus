@@ -226,11 +226,6 @@ install_package wget
 install_package curl
 install_package sudo
 install_package dos2unix
-install_package ufw
-install_package uidmap
-ufw disable || true
-systemctl stop firewalld || true
-systemctl disable firewalld || true
 install_package jq
 install_package ipcalc
 install_package unzip
@@ -336,6 +331,11 @@ if ! command -v incus >/dev/null 2>&1; then
 else
     echo "incus 已经安装 | incus is already installed"
 fi
+install_package ufw
+install_package uidmap
+ufw disable || true
+systemctl stop firewalld || true
+systemctl disable firewalld || true
 
 # 读取宿主机配置 获取可用磁盘空间（GB为单位）
 get_available_space() {
