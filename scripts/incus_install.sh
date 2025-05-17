@@ -385,22 +385,17 @@ else
     done
 fi
 
-# 资源池设置-硬盘
+# 资源池设置-硬盘 
 # incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto
-# btrfs 检测与安装
 if [ "${noninteractive:-false}" != false ]; then
     echo "dir" >/usr/local/bin/incus_storage_type
     incus admin init --storage-backend "$STORAGE_BACKEND" --auto
 else
-    temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-    if [[ $? -ne 0 ]]; then
-        status=false
-    else
-        status=true
+    has_apt=false
+    if command -v apt >/dev/null; then
+        has_apt=true
     fi
-    echo "$temp"
-    if echo "$temp" | grep -q "incus.migrate" && [[ $status == false ]]; then
-        incus.migrate
+    if [ "$has_apt" = true ]; then
         temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         if [[ $? -ne 0 ]]; then
             status=false
@@ -408,51 +403,98 @@ else
             status=true
         fi
         echo "$temp"
-    fi
-    if [[ $status == false ]]; then
-        _yellow "trying to use another storage type ......"
-        _yellow "尝试使用其他存储类型......"
-        # 类型设置-硬盘
+        if echo "$temp" | grep -q "incus.migrate" && [[ $status == false ]]; then
+            incus.migrate
+            temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+            if [[ $? -ne 0 ]]; then
+                status=false
+            else
+                status=true
+            fi
+            echo "$temp"
+        fi
+        if [[ $status == false ]]; then
+            yellow "trying to install btrfs and retry......"
+            yellow "尝试安装 btrfs 并重试......"
+            $PACKAGETYPE_INSTALL btrfs-progs
+            modprobe btrfs || true
+            temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+            if [[ $? -ne 0 ]]; then
+                status=false
+                green "Please reboot the machine (perform a reboot) and execute this script again to load the btrfs kernel"
+                green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核"
+                echo "" >/usr/local/bin/incus_reboot
+                exit 1
+            else
+                status=true
+                echo "btrfs" >/usr/local/bin/incus_storage_type
+            fi
+        else
+            echo "btrfs" >/usr/local/bin/incus_storage_type
+        fi
+    else
         SUPPORTED_BACKENDS=("zfs" "lvm" "ceph" "dir")
         STORAGE_BACKEND=""
         for backend in "${SUPPORTED_BACKENDS[@]}"; do
-            if command -v $backend >/dev/null; then
+            if command -v $backend >/dev/null || [ "$backend" = "dir" ]; then
                 STORAGE_BACKEND=$backend
                 if [ "$STORAGE_BACKEND" = "dir" ]; then
-                    if [ ! -f /usr/local/bin/incus_reboot ]; then
-                        $PACKAGETYPE_INSTALL btrfs-progs
-                        modprobe btrfs || true
-                        _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
-                        _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
-                        echo "" >/usr/local/bin/incus_reboot
-                        exit 1
-                    fi
-                    _green "Infinite storage pool size using default dir type due to no btrfs"
-                    _green "由于无btrfs，使用默认dir类型无限定存储池大小"
+                    green "Using default dir type with unlimited storage pool size"
+                    green "使用默认dir类型无限定存储池大小"
                     echo "dir" >/usr/local/bin/incus_storage_type
                     incus admin init --storage-backend "$STORAGE_BACKEND" --auto
                 else
-                    _green "Infinite storage pool size using default $backend type due to no btrfs"
-                    _green "由于无btrfs，使用默认 $backend 类型无限定存储池大小"
-                    DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
-                    incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto
-                fi
-                if [[ $? -ne 0 ]]; then
-                    _yellow "Use $STORAGE_BACKEND storage type failed."
-                    _yellow "使用 $STORAGE_BACKEND 存储类型失败。"
-                else
-                    echo $backend >/usr/local/bin/incus_storage_type
-                    break
+                    green "Using default $backend type with storage pool size $disk_nums"
+                    green "使用默认 $backend 类型，存储池大小为 $disk_nums"
+                    if [ "$backend" = "zfs" ]; then
+                        temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                    elif [ "$backend" = "lvm" ]; then
+                        DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
+                        temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+                    else
+                        temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                    fi
+                    if [[ $? -ne 0 ]]; then
+                        yellow "Using $backend storage type failed. Trying to install it..."
+                        yellow "使用 $backend 存储类型失败。尝试安装..."
+                        if [ "$backend" = "zfs" ]; then
+                            $PACKAGETYPE_INSTALL zfsutils-linux
+                            modprobe zfs || true
+                        elif [ "$backend" = "lvm" ]; then
+                            $PACKAGETYPE_INSTALL lvm2
+                            modprobe dm-mod || true
+                        fi
+                        if [ "$backend" = "zfs" ]; then
+                            temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                        elif [ "$backend" = "lvm" ]; then
+                            DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
+                            temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+                        else
+                            temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                        fi
+                        if [[ $? -ne 0 ]]; then
+                            green "Please reboot the machine (perform a reboot) and execute this script again to load the $backend kernel"
+                            green "请重启本机(执行 reboot 重启)再次执行本脚本以加载 $backend 内核"
+                            echo "" >/usr/local/bin/incus_reboot
+                            exit 1
+                        else
+                            echo "$backend" >/usr/local/bin/incus_storage_type
+                            break
+                        fi
+                    else
+                        echo "$backend" >/usr/local/bin/incus_storage_type
+                        break
+                    fi
                 fi
             fi
         done
         if [ -z "$STORAGE_BACKEND" ]; then
-            _yellow "No supported storage types, please contact the script maintainer"
-            _yellow "无可支持的存储类型，请联系脚本维护者"
-            exit 1
+            # 如果都不可用，最后尝试 dir
+            yellow "No supported storage types found, using dir as fallback"
+            yellow "未找到可支持的存储类型，使用 dir 作为备选"
+            echo "dir" >/usr/local/bin/incus_storage_type
+            incus admin init --storage-backend dir --auto
         fi
-    else
-        echo "btrfs" >/usr/local/bin/incus_storage_type
     fi
 fi
 $PACKAGETYPE_INSTALL uidmap
