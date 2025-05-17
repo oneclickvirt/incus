@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.02.02
+# 2025.05.17
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -137,6 +137,7 @@ install_package jq
 install_package uidmap
 install_package ipcalc
 install_package unzip
+install_package gpg
 install_package lsb_release
 # install_package lxcfs
 check_cdn_file
