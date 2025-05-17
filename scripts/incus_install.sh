@@ -331,11 +331,22 @@ if ! command -v incus >/dev/null 2>&1; then
 else
     echo "incus 已经安装 | incus is already installed"
 fi
-install_package ufw
 install_package uidmap
-ufw disable || true
-systemctl stop firewalld || true
-systemctl disable firewalld || true
+if command -v apt >/dev/null 2>&1; then
+    install_package ufw
+    ufw disable || true
+    systemctl stop firewalld || true
+    systemctl disable firewalld || true
+elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+    if command -v yum >/dev/null 2>&1; then
+        install_package iptables-services
+    else
+        install_package iptables-services
+    fi
+    systemctl enable iptables
+    systemctl start iptables
+    service iptables save
+fi
 
 # 读取宿主机配置 获取可用磁盘空间（GB为单位）
 get_available_space() {
@@ -410,6 +421,7 @@ else
                 if [ "$STORAGE_BACKEND" = "dir" ]; then
                     if [ ! -f /usr/local/bin/incus_reboot ]; then
                         $PACKAGETYPE_INSTALL btrfs-progs
+                        modprobe btrfs || true
                         _green "Please reboot the machine (perform a reboot reboot) and execute this script again to load the btrfs kernel, after the reboot you will need to enter the configuration you need init again"
                         _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核，重启后需要再次输入你需要的初始化的配置"
                         echo "" >/usr/local/bin/incus_reboot
