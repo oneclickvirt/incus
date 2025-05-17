@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.05.17
+# 2025.05.18
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -536,8 +536,9 @@ init_storage_backend() {
     if echo "$temp" | grep -q "incus.migrate" && [ $status -ne 0 ]; then
         incus.migrate
         if [ "$backend" = "lvm" ]; then
-            DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
-            temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+            # DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
+            # --storage-create-device $DISK
+            temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         fi
