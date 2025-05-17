@@ -396,6 +396,18 @@ else
         has_apt=true
     fi
     if [ "$has_apt" = true ]; then
+        if ! command -v btrfs >/dev/null; then
+            _yellow "trying to install btrfs before initializing......"
+            _yellow "尝试在初始化前安装 btrfs......"
+            $PACKAGETYPE_INSTALL btrfs-progs
+            modprobe btrfs || true
+            if ! grep -q btrfs /proc/filesystems; then
+                _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
+                _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
+                echo "" >/usr/local/bin/incus_reboot
+                exit 1
+            fi
+        fi
         temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         if [[ $? -ne 0 ]]; then
             status=false
@@ -413,91 +425,81 @@ else
             fi
             echo "$temp"
         fi
-        if [[ $status == false ]]; then
-            _yellow "trying to install btrfs and retry......"
-            _yellow "尝试安装 btrfs 并重试......"
-            $PACKAGETYPE_INSTALL btrfs-progs
-            modprobe btrfs || true
-            temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-            if [[ $? -ne 0 ]]; then
-                status=false
-                _green "Please reboot the machine (perform a reboot) and execute this script again to load the btrfs kernel"
-                _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核"
-                echo "" >/usr/local/bin/incus_reboot
-                exit 1
-            else
-                status=true
-                echo "btrfs" >/usr/local/bin/incus_storage_type
-            fi
-        else
+        if [[ $status == true ]]; then
             echo "btrfs" >/usr/local/bin/incus_storage_type
+        else
+            _yellow "btrfs初始化失败，尝试使用其他存储类型"
+            _yellow "btrfs initialization failed, trying other storage types"
+            SUPPORTED_BACKENDS=("zfs" "lvm" "dir")
+            init_with_other_backend
         fi
     else
-        SUPPORTED_BACKENDS=("zfs" "lvm" "ceph" "dir")
-        STORAGE_BACKEND=""
-        for backend in "${SUPPORTED_BACKENDS[@]}"; do
-            if command -v $backend >/dev/null || [ "$backend" = "dir" ]; then
-                STORAGE_BACKEND=$backend
-                if [ "$STORAGE_BACKEND" = "dir" ]; then
-                    _green "Using default dir type with unlimited storage pool size"
-                    _green "使用默认dir类型无限定存储池大小"
-                    echo "dir" >/usr/local/bin/incus_storage_type
-                    incus admin init --storage-backend "$STORAGE_BACKEND" --auto
-                else
-                    _green "Using default $backend type with storage pool size $disk_nums"
-                    _green "使用默认 $backend 类型，存储池大小为 $disk_nums"
-                    if [ "$backend" = "zfs" ]; then
-                        temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-                    elif [ "$backend" = "lvm" ]; then
-                        DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
-                        temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
-                    else
-                        temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-                    fi
-                    if [[ $? -ne 0 ]]; then
-                        _yellow "Using $backend storage type failed. Trying to install it..."
-                        _yellow "使用 $backend 存储类型失败。尝试安装..."
-                        if [ "$backend" = "zfs" ]; then
-                            $PACKAGETYPE_INSTALL zfsutils-linux
-                            modprobe zfs || true
-                        elif [ "$backend" = "lvm" ]; then
-                            $PACKAGETYPE_INSTALL lvm2
-                            modprobe dm-mod || true
-                        fi
-                        if [ "$backend" = "zfs" ]; then
-                            temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-                        elif [ "$backend" = "lvm" ]; then
-                            DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
-                            temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
-                        else
-                            temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
-                        fi
-                        if [[ $? -ne 0 ]]; then
-                            _green "Please reboot the machine (perform a reboot) and execute this script again to load the $backend kernel"
-                            _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载 $backend 内核"
-                            echo "" >/usr/local/bin/incus_reboot
-                            exit 1
-                        else
-                            echo "$backend" >/usr/local/bin/incus_storage_type
-                            break
-                        fi
-                    else
-                        echo "$backend" >/usr/local/bin/incus_storage_type
-                        break
-                    fi
-                fi
-            fi
-        done
-        if [ -z "$STORAGE_BACKEND" ]; then
-            # 如果都不可用，最后尝试 dir
-            _yellow "No supported storage types found, using dir as fallback"
-            _yellow "未找到可支持的存储类型，使用 dir 作为备选"
-            echo "dir" >/usr/local/bin/incus_storage_type
-            incus admin init --storage-backend dir --auto
-        fi
+        init_with_other_backend
     fi
 fi
 $PACKAGETYPE_INSTALL uidmap
+
+init_with_other_backend() {
+    SUPPORTED_BACKENDS=("zfs" "lvm" "ceph" "dir")
+    STORAGE_BACKEND=""
+    for backend in "${SUPPORTED_BACKENDS[@]}"; do
+        if command -v $backend >/dev/null || [ "$backend" = "dir" ]; then
+            STORAGE_BACKEND=$backend
+            if [ "$STORAGE_BACKEND" = "dir" ]; then
+                _green "Using default dir type with unlimited storage pool size"
+                _green "使用默认dir类型无限定存储池大小"
+                echo "dir" >/usr/local/bin/incus_storage_type
+                incus admin init --storage-backend "$STORAGE_BACKEND" --auto
+                return 0
+            else
+                _green "Using default $backend type with storage pool size $disk_nums"
+                _green "使用默认 $backend 类型，存储池大小为 $disk_nums"
+                if [ "$backend" = "zfs" ] && ! command -v zfs >/dev/null; then
+                    _yellow "Installing zfsutils-linux..."
+                    _yellow "正在安装 zfsutils-linux..."
+                    $PACKAGETYPE_INSTALL zfsutils-linux
+                    modprobe zfs || true
+                    if ! grep -q zfs /proc/filesystems; then
+                        _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
+                        _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
+                        echo "" >/usr/local/bin/incus_reboot
+                        exit 1
+                    fi
+                elif [ "$backend" = "lvm" ] && ! command -v lvm >/dev/null; then
+                    _yellow "Installing lvm2..."
+                    _yellow "正在安装 lvm2..."
+                    $PACKAGETYPE_INSTALL lvm2
+                    modprobe dm-mod || true
+                    if ! grep -q dm-mod /proc/modules; then
+                        _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
+                        _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
+                        echo "" >/usr/local/bin/incus_reboot
+                        exit 1
+                    fi
+                fi
+                if [ "$backend" = "zfs" ]; then
+                    temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                elif [ "$backend" = "lvm" ]; then
+                    DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}')
+                    temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+                else
+                    temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
+                fi
+                if [[ $? -eq 0 ]]; then
+                    echo "$backend" >/usr/local/bin/incus_storage_type
+                    return 0
+                else
+                    _yellow "Using $backend failed, trying next option"
+                    _yellow "使用 $backend 失败，尝试下一个选项"
+                fi
+            fi
+        fi
+    done
+    _yellow "No supported storage types found, using dir as fallback"
+    _yellow "未找到可支持的存储类型，使用 dir 作为备选"
+    echo "dir" >/usr/local/bin/incus_storage_type
+    incus admin init --storage-backend dir --auto
+}
 
 # 虚拟内存设置
 curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/swap2.sh" -o swap2.sh && chmod +x swap2.sh
