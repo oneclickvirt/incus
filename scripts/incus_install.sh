@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.02.02
+# 2025.05.17
 
 # curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/incus_install.sh -o incus_install.sh && chmod +x incus_install.sh && bash incus_install.sh
 
@@ -205,6 +205,7 @@ install_package uidmap
 install_package ipcalc
 install_package unzip
 install_package lsb_release
+install_package gpg
 # install_package lxcfs
 check_cdn_file
 rebuild_cloud_init
