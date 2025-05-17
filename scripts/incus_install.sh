@@ -388,17 +388,30 @@ else
 fi
 
 # 资源池设置-硬盘 
-# 优先级顺序：btrfs(仅apt可用时) > zfs > lvm > ceph > dir
+# 优先级顺序：btrfs(仅apt可用时) > lvm > zfs > ceph > dir
 TRIED_STORAGE_FILE="/usr/local/bin/incus_tried_storage"
+INSTALLED_STORAGE_FILE="/usr/local/bin/incus_installed_storage"
+
 if [ -f "$TRIED_STORAGE_FILE" ]; then
     TRIED_STORAGE=($(cat "$TRIED_STORAGE_FILE"))
 else
     TRIED_STORAGE=()
 fi
 
+if [ -f "$INSTALLED_STORAGE_FILE" ]; then
+    INSTALLED_STORAGE=($(cat "$INSTALLED_STORAGE_FILE"))
+else
+    INSTALLED_STORAGE=()
+fi
+
 record_tried_storage() {
     local storage_type="$1"
     echo "$storage_type" >> "$TRIED_STORAGE_FILE"
+}
+
+record_installed_storage() {
+    local storage_type="$1"
+    echo "$storage_type" >> "$INSTALLED_STORAGE_FILE"
 }
 
 is_storage_tried() {
@@ -411,6 +424,16 @@ is_storage_tried() {
     return 1  # 未尝试过 (False)
 }
 
+is_storage_installed() {
+    local storage_type="$1"
+    for installed in "${INSTALLED_STORAGE[@]}"; do
+        if [ "$installed" = "$storage_type" ]; then
+            return 0  # 已安装过 (True)
+        fi
+    done
+    return 1  # 未安装过 (False)
+}
+
 init_storage_backend() {
     local backend="$1"
     if is_storage_tried "$backend"; then
@@ -418,59 +441,92 @@ init_storage_backend() {
         _yellow "Already tried $backend, skipping"
         return 1
     fi
-    record_tried_storage "$backend"
     if [ "$backend" = "dir" ]; then
         _green "使用默认dir类型无限定存储池大小"
         _green "Using default dir type with unlimited storage pool size"
         echo "dir" > /usr/local/bin/incus_storage_type
         incus admin init --storage-backend "$backend" --auto
+        record_tried_storage "$backend"
         return $?
     fi
     _green "尝试使用 $backend 类型，存储池大小为 $disk_nums"
     _green "Trying to use $backend type with storage pool size $disk_nums"
-    if [ "$backend" = "btrfs" ] && ! command -v btrfs >/dev/null; then
+    local need_reboot=false
+    # 只有当驱动未安装时才尝试安装
+    if [ "$backend" = "btrfs" ] && ! is_storage_installed "btrfs" ] && ! command -v btrfs >/dev/null; then
         _yellow "正在安装 btrfs-progs..."
         _yellow "Installing btrfs-progs..."
         $PACKAGETYPE_INSTALL btrfs-progs
+        record_installed_storage "btrfs"
         modprobe btrfs || true
         if ! grep -q btrfs /proc/filesystems; then
             _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
             _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
             echo "$backend" > /usr/local/bin/incus_reboot
-            exit 1
+            need_reboot=true
         fi
-    elif [ "$backend" = "zfs" ] && ! command -v zfs >/dev/null; then
-        _yellow "正在安装 zfsutils-linux..."
-        _yellow "Installing zfsutils-linux..."
-        $PACKAGETYPE_INSTALL zfsutils-linux
-        modprobe zfs || true
-        if ! grep -q zfs /proc/filesystems; then
-            _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
-            _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" > /usr/local/bin/incus_reboot
-            exit 1
-        fi
-    elif [ "$backend" = "lvm" ] && ! command -v lvm >/dev/null; then
+    elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" ] && ! command -v lvm >/dev/null; then
         _yellow "正在安装 lvm2..."
         _yellow "Installing lvm2..."
         $PACKAGETYPE_INSTALL lvm2
+        record_installed_storage "lvm"
         modprobe dm-mod || true
         if ! grep -q dm-mod /proc/modules; then
             _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
             _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
             echo "$backend" > /usr/local/bin/incus_reboot
-            exit 1
+            need_reboot=true
         fi
-    elif [ "$backend" = "ceph" ] && ! command -v ceph >/dev/null; then
+    elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" ] && ! command -v zfs >/dev/null; then
+        _yellow "正在安装 zfsutils-linux..."
+        _yellow "Installing zfsutils-linux..."
+        $PACKAGETYPE_INSTALL zfsutils-linux
+        record_installed_storage "zfs"
+        modprobe zfs || true
+        if ! grep -q zfs /proc/filesystems; then
+            _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
+            _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
+            echo "$backend" > /usr/local/bin/incus_reboot
+            need_reboot=true
+        fi
+    elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" ] && ! command -v ceph >/dev/null; then
         _yellow "正在安装 ceph-common..."
         _yellow "Installing ceph-common..."
         $PACKAGETYPE_INSTALL ceph-common
+        record_installed_storage "ceph"
         # Ceph doesn't require kernel module loading like the others
+    fi
+    # 检查是否已安装但还未尝试加载模块
+    if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" ] && ! grep -q btrfs /proc/filesystems; then
+        modprobe btrfs || true
+        if ! grep -q btrfs /proc/filesystems; then
+            _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
+            _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
+            echo "$backend" > /usr/local/bin/incus_reboot
+            need_reboot=true
+        fi
+    elif [ "$backend" = "lvm" ] && is_storage_installed "lvm" ] && ! grep -q dm-mod /proc/modules; then
+        modprobe dm-mod || true
+        if ! grep -q dm-mod /proc/modules; then
+            _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
+            _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
+            echo "$backend" > /usr/local/bin/incus_reboot
+            need_reboot=true
+        fi
+    elif [ "$backend" = "zfs" ] && is_storage_installed "zfs" ] && ! grep -q zfs /proc/filesystems; then
+        modprobe zfs || true
+        if ! grep -q zfs /proc/filesystems; then
+            _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
+            _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
+            echo "$backend" > /usr/local/bin/incus_reboot
+            need_reboot=true
+        fi
+    fi
+    if [ "$need_reboot" = true ]; then
+        exit 1
     fi
     local temp
     if [ "$backend" = "lvm" ]; then
-        # DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
-        # --storage-create-device $DISK
         temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
     else
         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
@@ -488,6 +544,7 @@ init_storage_backend() {
         status=$?
         echo "$temp"
     fi
+    record_tried_storage "$backend"
     if [ $status -eq 0 ]; then
         _green "使用 $backend 初始化成功"
         _green "Successfully initialized using $backend"
@@ -508,11 +565,12 @@ setup_storage() {
         rm -f /usr/local/bin/incus_reboot
         if [ "$REBOOT_BACKEND" = "btrfs" ]; then
             modprobe btrfs || true
-        elif [ "$REBOOT_BACKEND" = "zfs" ]; then
-            modprobe zfs || true
         elif [ "$REBOOT_BACKEND" = "lvm" ]; then
             modprobe dm-mod || true
+        elif [ "$REBOOT_BACKEND" = "zfs" ]; then
+            modprobe zfs || true
         fi
+        # 重启后直接尝试该驱动，无论成功与否都将被记录为已尝试
         if init_storage_backend "$REBOOT_BACKEND"; then
             return 0
         fi
@@ -521,7 +579,7 @@ setup_storage() {
     if command -v apt >/dev/null; then
         BACKENDS+=("btrfs")
     fi
-    BACKENDS+=("zfs" "lvm" "ceph" "dir")
+    BACKENDS+=("lvm" "zfs" "ceph" "dir")
     for backend in "${BACKENDS[@]}"; do
         if init_storage_backend "$backend"; then
             return 0
@@ -541,7 +599,6 @@ if [ "${noninteractive:-false}" != false ]; then
 else
     setup_storage
 fi
-$PACKAGETYPE_INSTALL uidmap
 
 # 虚拟内存设置
 curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/swap2.sh" -o swap2.sh && chmod +x swap2.sh
