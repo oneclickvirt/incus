@@ -229,7 +229,6 @@ install_package dos2unix
 install_package jq
 install_package ipcalc
 install_package unzip
-install_package lsb_release
 install_package gpg
 # install_package lxcfs
 check_cdn_file
@@ -332,6 +331,7 @@ else
     echo "incus 已经安装 | incus is already installed"
 fi
 install_package uidmap
+install_package lsb_release
 if command -v apt >/dev/null 2>&1; then
     install_package ufw
     ufw disable || true
@@ -531,8 +531,11 @@ else
 fi
 # 加载iptables并设置回源且允许NAT端口转发
 install_package iptables
-install_package iptables-persistent
+install_package iptables-persistent || true
 iptables -t nat -A POSTROUTING -j MASQUERADE
+if command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+  service iptables save
+fi
 # 设置IPV4优先
 sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf && systemctl restart networking
 _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
