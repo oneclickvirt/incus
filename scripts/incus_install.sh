@@ -73,7 +73,7 @@ if [ -f /etc/os-release ]; then
         PACKAGETYPE_REMOVE="apt remove -y"
         YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
         ;;
-    centos)
+    centos | almalinux | rockylinux)
         OS="$ID"
         VERSION="$VERSION_ID"
         PACKAGETYPE="dnf"
@@ -102,6 +102,29 @@ if [ -f /etc/os-release ]; then
         PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
         ;;
     esac
+fi
+if [ -z "${PACKAGETYPE:-}" ]; then
+    if command -v apt >/dev/null 2>&1; then
+        PACKAGETYPE="apt"
+        PACKAGETYPE_INSTALL="apt install -y"
+        PACKAGETYPE_UPDATE="apt update -y"
+        PACKAGETYPE_REMOVE="apt remove -y"
+    elif command -v dnf >/dev/null 2>&1; then
+        PACKAGETYPE="dnf"
+        PACKAGETYPE_INSTALL="dnf install -y"
+        PACKAGETYPE_UPDATE="dnf check-update"
+        PACKAGETYPE_REMOVE="dnf remove -y"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGETYPE="yum"
+        PACKAGETYPE_INSTALL="yum install -y"
+        PACKAGETYPE_UPDATE="yum check-update"
+        PACKAGETYPE_REMOVE="yum remove -y"
+    elif command -v pacman >/dev/null 2>&1; then
+        PACKAGETYPE="pacman"
+        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+        PACKAGETYPE_UPDATE="pacman -Sy"
+        PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+    fi
 fi
 
 install_package() {
