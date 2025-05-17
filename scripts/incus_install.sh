@@ -224,7 +224,6 @@ install_package sudo
 install_package dos2unix
 install_package ufw
 install_package jq
-install_package uidmap
 install_package ipcalc
 install_package unzip
 install_package lsb_release
@@ -285,9 +284,9 @@ if ! command -v incus >/dev/null 2>&1; then
         echo "检测到 Gentoo | Detected Gentoo"
         echo "使用 emerge 安装 incus | Installing incus using emerge"
         emerge -av app-containers/incus
-    # RPM 系统（例如 Rocky Linux）
-    elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ]; then
-        echo "检测到 RPM 系统（如 Rocky Linux） | Detected RPM-based system (e.g., Rocky Linux)"
+    # RPM 系统
+    elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ] || [ -f /etc/almalinux-release ] || [ -f /etc/rockylinux-release ]; then
+        echo "检测到 RPM 系统 | Detected RPM-based system"
         echo "安装 epel-release，并启用 COPR 仓库及 CodeReady Builder (CRB) | Installing epel-release, enabling COPR repository and CodeReady Builder (CRB)"
         dnf -y install epel-release
         dnf copr enable -y neil/incus
@@ -329,9 +328,10 @@ if ! command -v incus >/dev/null 2>&1; then
 else
     echo "incus 已经安装 | incus is already installed"
 fi
+# uidmap在rpm系中在epel-release里，得前面安装了先
+install_package uidmap
 
-# 读取母鸡配置
-# 函数：获取可用磁盘空间（GB为单位）
+# 读取宿主机配置 获取可用磁盘空间（GB为单位）
 get_available_space() {
     local available_space
     available_space=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
@@ -357,8 +357,8 @@ else
     done
 
     while true; do
-        _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the SWAP and storage pool add up to 95% of the space of the hen's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
-        reading "宿主机需要开设多大的存储池？(存储池就是小鸡硬盘之和的大小，推荐SWAP和存储池加起来达到母鸡硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums
+        _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the SWAP and storage pool add up to 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
+        reading "宿主机需要开设多大的存储池？(存储池就是小鸡硬盘之和的大小，推荐SWAP和存储池加起来达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums
         if [[ "$disk_nums" =~ ^[1-9][0-9]*$ ]]; then
             break
         else
