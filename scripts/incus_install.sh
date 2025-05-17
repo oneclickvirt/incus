@@ -227,6 +227,7 @@ install_package curl
 install_package sudo
 install_package dos2unix
 install_package ufw
+install_package uidmap
 ufw disable || true
 systemctl stop firewalld || true
 systemctl disable firewalld || true
@@ -335,8 +336,6 @@ if ! command -v incus >/dev/null 2>&1; then
 else
     echo "incus 已经安装 | incus is already installed"
 fi
-# uidmap在rpm系中在epel-release里，得前面安装了先
-install_package uidmap
 
 # 读取宿主机配置 获取可用磁盘空间（GB为单位）
 get_available_space() {
