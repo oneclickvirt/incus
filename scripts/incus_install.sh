@@ -129,13 +129,17 @@ fi
 
 install_package() {
     package_name=$1
-    if command -v $package_name >/dev/null 2>&1; then
+    if command -v "$package_name" >/dev/null 2>&1; then
         _green "$package_name has been installed"
         _green "$package_name 已经安装"
-    else
-        $PACKAGETYPE_INSTALL $package_name
-        _green "$package_name has attempted to install"
+        return 0
+    fi
+    if $PACKAGETYPE_INSTALL "$package_name"; then
+        _green "$package_name has been installed"
         _green "$package_name 已尝试安装"
+        return 0
+    else
+        return 1
     fi
 }
 
@@ -223,6 +227,9 @@ install_package curl
 install_package sudo
 install_package dos2unix
 install_package ufw
+ufw disable || true
+systemctl stop firewalld || true
+systemctl disable firewalld || true
 install_package jq
 install_package ipcalc
 install_package unzip
@@ -496,7 +503,6 @@ if [ -f "/etc/systemd/logind.conf" ]; then
         echo 'UserTasksMax=infinity' | sudo tee -a /etc/systemd/logind.conf
     fi
 fi
-ufw disable
 if [ ! -f /usr/local/bin/check-dns.sh ]; then
     wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.sh -O /usr/local/bin/check-dns.sh
     chmod +x /usr/local/bin/check-dns.sh
