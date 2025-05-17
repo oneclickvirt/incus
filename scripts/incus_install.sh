@@ -414,15 +414,15 @@ else
             echo "$temp"
         fi
         if [[ $status == false ]]; then
-            yellow "trying to install btrfs and retry......"
-            yellow "尝试安装 btrfs 并重试......"
+            _yellow "trying to install btrfs and retry......"
+            _yellow "尝试安装 btrfs 并重试......"
             $PACKAGETYPE_INSTALL btrfs-progs
             modprobe btrfs || true
             temp=$(incus admin init --storage-backend btrfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             if [[ $? -ne 0 ]]; then
                 status=false
-                green "Please reboot the machine (perform a reboot) and execute this script again to load the btrfs kernel"
-                green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核"
+                _green "Please reboot the machine (perform a reboot) and execute this script again to load the btrfs kernel"
+                _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载btrfs内核"
                 echo "" >/usr/local/bin/incus_reboot
                 exit 1
             else
@@ -439,13 +439,13 @@ else
             if command -v $backend >/dev/null || [ "$backend" = "dir" ]; then
                 STORAGE_BACKEND=$backend
                 if [ "$STORAGE_BACKEND" = "dir" ]; then
-                    green "Using default dir type with unlimited storage pool size"
-                    green "使用默认dir类型无限定存储池大小"
+                    _green "Using default dir type with unlimited storage pool size"
+                    _green "使用默认dir类型无限定存储池大小"
                     echo "dir" >/usr/local/bin/incus_storage_type
                     incus admin init --storage-backend "$STORAGE_BACKEND" --auto
                 else
-                    green "Using default $backend type with storage pool size $disk_nums"
-                    green "使用默认 $backend 类型，存储池大小为 $disk_nums"
+                    _green "Using default $backend type with storage pool size $disk_nums"
+                    _green "使用默认 $backend 类型，存储池大小为 $disk_nums"
                     if [ "$backend" = "zfs" ]; then
                         temp=$(incus admin init --storage-backend zfs --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
                     elif [ "$backend" = "lvm" ]; then
@@ -455,8 +455,8 @@ else
                         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
                     fi
                     if [[ $? -ne 0 ]]; then
-                        yellow "Using $backend storage type failed. Trying to install it..."
-                        yellow "使用 $backend 存储类型失败。尝试安装..."
+                        _yellow "Using $backend storage type failed. Trying to install it..."
+                        _yellow "使用 $backend 存储类型失败。尝试安装..."
                         if [ "$backend" = "zfs" ]; then
                             $PACKAGETYPE_INSTALL zfsutils-linux
                             modprobe zfs || true
@@ -473,8 +473,8 @@ else
                             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
                         fi
                         if [[ $? -ne 0 ]]; then
-                            green "Please reboot the machine (perform a reboot) and execute this script again to load the $backend kernel"
-                            green "请重启本机(执行 reboot 重启)再次执行本脚本以加载 $backend 内核"
+                            _green "Please reboot the machine (perform a reboot) and execute this script again to load the $backend kernel"
+                            _green "请重启本机(执行 reboot 重启)再次执行本脚本以加载 $backend 内核"
                             echo "" >/usr/local/bin/incus_reboot
                             exit 1
                         else
@@ -490,8 +490,8 @@ else
         done
         if [ -z "$STORAGE_BACKEND" ]; then
             # 如果都不可用，最后尝试 dir
-            yellow "No supported storage types found, using dir as fallback"
-            yellow "未找到可支持的存储类型，使用 dir 作为备选"
+            _yellow "No supported storage types found, using dir as fallback"
+            _yellow "未找到可支持的存储类型，使用 dir 作为备选"
             echo "dir" >/usr/local/bin/incus_storage_type
             incus admin init --storage-backend dir --auto
         fi
