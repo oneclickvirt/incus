@@ -662,6 +662,17 @@ if command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
 fi
 # 设置IPV4优先
 sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf && systemctl restart networking
+# 设置UID/GID配置
+USER_NAME="root"
+UID_RANGE="100000:65536"
+for FILE in /etc/subuid /etc/subgid; do
+    LINE="${USER_NAME}:${UID_RANGE}"
+    if ! grep -q "^${LINE}$" "$FILE"; then
+        echo "$LINE" | sudo tee -a "$FILE"
+    else
+        echo "$FILE already contains: $LINE"
+    fi
+done
 _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
 _green "Incus Version: $(incus --version)"
 _green "If you need to turn on more than 100 cts, it is recommended to wait for a few minutes before performing a reboot to reboot the machine to make the settings take effect"
