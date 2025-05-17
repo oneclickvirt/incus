@@ -340,8 +340,10 @@ if command -v apt >/dev/null 2>&1; then
 elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
     if command -v yum >/dev/null 2>&1; then
         install_package iptables-services
+        install_package epel-release
     else
         install_package iptables-services
+        install_package epel-release
     fi
     systemctl enable iptables
     systemctl start iptables
@@ -467,8 +469,9 @@ init_storage_backend() {
     fi
     local temp
     if [ "$backend" = "lvm" ]; then
-        DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
-        temp=$(incus admin init --storage-backend lvm --storage-create-device $DISK --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+        # DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
+        # --storage-create-device $DISK
+        temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
     else
         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
     fi
