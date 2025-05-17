@@ -499,28 +499,10 @@ init_storage_backend() {
     # 检查是否已安装但还未尝试加载模块
     if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" ] && ! grep -q btrfs /proc/filesystems; then
         modprobe btrfs || true
-        if ! grep -q btrfs /proc/filesystems; then
-            _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
-            _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" > /usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
     elif [ "$backend" = "lvm" ] && is_storage_installed "lvm" ] && ! grep -q dm-mod /proc/modules; then
         modprobe dm-mod || true
-        if ! grep -q dm-mod /proc/modules; then
-            _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
-            _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" > /usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
     elif [ "$backend" = "zfs" ] && is_storage_installed "zfs" ] && ! grep -q zfs /proc/filesystems; then
         modprobe zfs || true
-        if ! grep -q zfs /proc/filesystems; then
-            _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
-            _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" > /usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
     fi
     if [ "$need_reboot" = true ]; then
         exit 1
@@ -536,8 +518,6 @@ init_storage_backend() {
     if echo "$temp" | grep -q "incus.migrate" && [ $status -ne 0 ]; then
         incus.migrate
         if [ "$backend" = "lvm" ]; then
-            # DISK=$(lsblk -p -o NAME,TYPE | awk '$2=="disk"{print $1}' | head -1)
-            # --storage-create-device $DISK
             temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
