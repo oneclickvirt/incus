@@ -681,6 +681,7 @@ main() {
     configure_uid_gid
     download_preconfigured_files
     copy_scripts_to_system
+    systemctl restart incus
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
     _green "You must reboot the machine to ensure user permissions are properly loaded."
