@@ -563,8 +563,8 @@ configure_incus_settings() {
     incus config unset images.auto_update_interval
     incus config set images.auto_update_interval 0
     incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
-    incus network set incusbr0 ipv6.firewall false
-    incus network set incusbr0 ipv4.firewall false
+    # incus network set incusbr0 ipv6.firewall false
+    # incus network set incusbr0 ipv4.firewall false
     incus network set incusbr0 ipv6.address auto
     incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
     incus network set incusbr0 dns.mode managed
