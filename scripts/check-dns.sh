@@ -1,7 +1,6 @@
 #!/bin/bash
 #from https://github.com/oneclickvirt/incus
 # 2025.05.18
-
 set -e
 
 DNS_SERVERS_IPV4=(
@@ -16,6 +15,8 @@ DNS_SERVERS_IPV6=(
     "2001:4860:4860::8844"
 )
 
+GAI_CONF="/etc/gai.conf"
+
 join() {
     local IFS="$1"
     shift
@@ -28,6 +29,43 @@ check_nmcli() {
 
 check_resolvectl() {
     command -v resolvectl >/dev/null 2>&1
+}
+
+backup_file() {
+    local file=$1
+    local backup_file="${file}.bak.$(date +%F-%T)"
+    echo "备份 $file 到 $backup_file"
+    cp "$file" "$backup_file"
+}
+
+set_ipv4_precedence_gai() {
+    echo "配置 IPv4 优先，修改 $GAI_CONF"
+    if [ ! -f "$GAI_CONF" ]; then
+        echo "$GAI_CONF 不存在，跳过 IPv4 优先设置。"
+        return
+    fi
+    if grep -q "^precedence ::ffff:0:0/96  100" "$GAI_CONF"; then
+        echo "$GAI_CONF 中 IPv4 优先规则已存在。"
+    else
+        backup_file "$GAI_CONF"
+        echo -e "\n# 增加 IPv4 优先规则，2025.05.18 自动添加" >>"$GAI_CONF"
+        echo "precedence ::ffff:0:0/96  100" >>"$GAI_CONF"
+        echo "IPv4 优先规则已添加到 $GAI_CONF"
+    fi
+}
+
+adjust_nmcli_ipv6_route_metric() {
+    local CONN_NAME=$1
+    echo "调整连接 $CONN_NAME 的 IPv6 路由 metric 以降低 IPv6 优先级"
+    # 获取当前 IPv6 路由 metric（没找到用默认100）
+    local METRIC=$(nmcli connection show "$CONN_NAME" | grep '^ipv6.route-metric:' | awk '{print $2}')
+    if [ -z "$METRIC" ]; then
+        METRIC=100
+    fi
+    # 提高 metric (降低优先级) +100
+    local NEW_METRIC=$((METRIC + 100))
+    nmcli connection modify "$CONN_NAME" ipv6.route-metric "$NEW_METRIC"
+    echo "IPv6 路由 metric 从 $METRIC 调整到 $NEW_METRIC"
 }
 
 backup_resolv_conf() {
@@ -51,8 +89,9 @@ write_resolv_conf() {
     echo "/etc/resolv.conf 更新完成"
 }
 
+set_ipv4_precedence_gai
 if check_nmcli; then
-    echo "检测到 NetworkManager，使用 nmcli 设置 DNS"
+    echo "检测到 NetworkManager，使用 nmcli 设置 DNS 和路由优先"
     CONN_NAME=$(nmcli -t -f NAME,DEVICE connection show --active | head -n1 | cut -d: -f1)
     if [ -z "$CONN_NAME" ]; then
         echo "未检测到活动连接，退出。"
@@ -70,12 +109,13 @@ if check_nmcli; then
         nmcli connection modify "$CONN_NAME" ipv6.ignore-auto-dns yes
         nmcli connection modify "$CONN_NAME" ipv4.dns "$(join ' ' "${DNS_SERVERS_IPV4[@]}")"
         nmcli connection modify "$CONN_NAME" ipv6.dns "$(join ' ' "${DNS_SERVERS_IPV6[@]}")"
+        echo "调整 IPv6 路由 metric"
+        adjust_nmcli_ipv6_route_metric "$CONN_NAME"
         echo "重启连接应用配置..."
         nmcli connection down "$CONN_NAME"
         nmcli connection up "$CONN_NAME"
-        echo "DNS 配置已更新。"
+        echo "DNS 和路由优先级配置已更新。"
     fi
-
 elif check_resolvectl && systemctl is-active --quiet systemd-resolved; then
     echo "检测到 systemd-resolved，使用 resolvectl 设置 DNS"
     IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
@@ -94,7 +134,7 @@ elif check_resolvectl && systemctl is-active --quiet systemd-resolved; then
         resolvectl domain "$IFACE" "spiritlhl.net"
         echo "DNS 配置已更新。"
     fi
-
+    echo "提示：IPv4优先建议通过修改 /etc/gai.conf 来实现"
 else
     echo "未检测到 NetworkManager 或 systemd-resolved，准备直接修改 /etc/resolv.conf"
     backup_resolv_conf
