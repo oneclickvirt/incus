@@ -73,13 +73,13 @@ detect_os() {
             PACKAGETYPE_REMOVE="apt remove -y"
             YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
             ;;
-        centos | almalinux | rockylinux)
+        centos | almalinux | rocky)
             OS="$ID"
             VERSION="$VERSION_ID"
             PACKAGETYPE="dnf"
             PACKAGETYPE_INSTALL="dnf install -y"
             PACKAGETYPE_REMOVE="dnf remove -y"
-            if [ "$VERSION" = "7" ]; then
+            if [[ "$VERSION" =~ ^7 ]]; then
                 PACKAGETYPE="yum"
             fi
             ;;
