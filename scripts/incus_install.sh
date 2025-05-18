@@ -684,8 +684,8 @@ main() {
     systemctl restart incus
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
-    _green "You must reboot the machine to ensure user permissions are properly loaded."
-    _green "必须重启本机以保证用户权限正确加载。"
+    _green "You must reboot the machine to ensure user permissions are properly loaded.(You may need to wait up to 10 minutes for the server to start up properly.)"
+    _green "必须重启本机以保证用户权限正确加载。(最长可能需要等待10分钟服务器才会正常启动)"
 }
 
 main
