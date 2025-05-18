@@ -626,11 +626,16 @@ install_dns_checker() {
 }
 
 setup_iptables() {
-    install_package iptables
-    install_package iptables-persistent || true
-    iptables -t nat -A POSTROUTING -j MASQUERADE
-    if command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
-        service iptables save
+    if command -v apt >/dev/null 2>&1; then
+        install_package iptables
+        install_package iptables-persistent || true
+        iptables -t nat -A POSTROUTING -j MASQUERADE
+        netfilter-persistent save || true
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --zone=public --add-masquerade
+        firewall-cmd --reload
+    else
+        echo "Unsupported system: no iptables-persistent or firewall-cmd found"
     fi
 }
 
