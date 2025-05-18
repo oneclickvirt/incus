@@ -24,7 +24,6 @@ setup_environment() {
     fi
 }
 
-# 检测操作系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -57,7 +56,7 @@ detect_os() {
             PACKAGETYPE_REMOVE="apt remove -y"
             YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
             ;;
-        centos | almalinux | rockylinux)
+        centos | almalinux | rocky)
             OS="$ID"
             VERSION="$VERSION_ID"
             PACKAGETYPE="dnf"
