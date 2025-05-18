@@ -4,9 +4,6 @@
 
 DNS_SERVER="2001:4860:4860::8844"
 RESOLV_CONF="/etc/resolv.conf"
-ufw disable || true
-systemctl stop firewalld || true
-systemctl disable firewalld || true
 grep -q "^nameserver ${DNS_SERVER}$" ${RESOLV_CONF}
 if [ $? -eq 0 ]; then
     echo "DNS server ${DNS_SERVER} already exists in ${RESOLV_CONF}."
