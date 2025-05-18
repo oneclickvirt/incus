@@ -288,7 +288,8 @@ wait_for_container_stopped() {
     local interval=3
     local elapsed_time=0
     while [ $elapsed_time -lt $timeout ]; do
-        status=$(incus info "$container_name" | grep "Status: STOPPED")
+        incus stop "$container_name"
+        status=$(incus info "$container_name" | grep "STOPPED")
         if [[ "$status" == *STOPPED* ]]; then
             break
         fi
