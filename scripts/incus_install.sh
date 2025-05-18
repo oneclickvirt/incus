@@ -685,10 +685,12 @@ main() {
     systemctl restart incus
     sleep 6
     systemctl stop incus
+    sleep 6
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
-    _green "You must reboot the machine to ensure user permissions are properly loaded."
-    _green "必须重启本机以保证用户权限正确加载。"
+    _green "You must reboot the machine to ensure user permissions are properly loaded. (The machine will restart automatically after 15 seconds)"
+    _green "必须重启本机以保证用户权限正确加载。(15秒后本机将自动重启)"
+    sleep 15 && reboot
 }
 
 main
