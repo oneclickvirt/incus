@@ -633,19 +633,28 @@ setup_iptables() {
 }
 
 configure_uid_gid() {
-    UID_RANGE="100000:65536"
-    USERS=("root" "$USER")
-    FILES=(/etc/subuid /etc/subgid)
-    for FILE in "${FILES[@]}"; do
-        sudo touch "$FILE"
-        for USER_NAME in "${USERS[@]}"; do
-            sudo sed -i "/^${USER_NAME}:[0-9]\+:[0-9]\+/d" "$FILE"
-        done
-        for USER_NAME in "${USERS[@]}"; do
-            echo "${USER_NAME}:${UID_RANGE}" | sudo tee -a "$FILE" >/dev/null
-        done
+  local UID_RANGE="${1:-100000:65536}"
+  local FILES=(/etc/subuid /etc/subgid)
+  local USERS=(root)
+  if [[ ! "$UID_RANGE" =~ ^[0-9]+:[0-9]+$ ]]; then
+    echo "Error: UID_RANGE '$UID_RANGE' is not in 'start:count' numeric format." >&2
+    return 1
+  fi
+  for FILE in "${FILES[@]}"; do
+    sudo touch "$FILE"
+    for USER_NAME in "${USERS[@]}"; do
+      sudo sed -i -E "/^${USER_NAME}:[0-9]+:[0-9]+/d" "$FILE"
     done
-    grep -E "^(root|$USER):" /etc/subuid /etc/subgid || true
+    for USER_NAME in "${USERS[@]}"; do
+      if getent passwd "$USER_NAME" > /dev/null; then
+        echo "Setting subuid/subgid for $USER_NAME: $UID_RANGE"
+        echo "${USER_NAME}:${UID_RANGE}" | sudo tee -a "$FILE" >/dev/null
+      else
+        echo "Warning: user '$USER_NAME' does not exist; skipping $FILE." >&2
+      fi
+    done
+  done
+  grep -E "^($(IFS="|"; echo "${USERS[*]}"))/" /etc/subuid /etc/subgid || true
 }
 
 copy_scripts_to_system() {
