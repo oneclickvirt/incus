@@ -337,6 +337,7 @@ setup_firewall() {
     fi
     install_package lsb_release
     install_package uidmap
+    install_package sipcalc
 }
 
 get_available_space() {
