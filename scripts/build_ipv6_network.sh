@@ -112,21 +112,61 @@ detect_os() {
     fi
 }
 
-# 安装软件包
 install_package() {
-    package_name=$1
-    if command -v "$package_name" >/dev/null 2>&1; then
-        _green "$package_name has been installed"
-        _green "$package_name 已经安装"
+    local pkg=$1
+    if command -v "$pkg" &>/dev/null; then
+        _green "$pkg has been installed"
+        _green "$pkg 已经安装"
         return 0
     fi
-    if $PACKAGETYPE_INSTALL "$package_name"; then
-        _green "$package_name has been installed"
-        _green "$package_name 已尝试安装"
+    if $PACKAGETYPE_INSTALL "$pkg"; then
+        _green "$pkg has been installed"
+        _green "$pkg 已尝试安装"
         return 0
-    else
-        return 1
     fi
+    if command -v rpm >/dev/null && ! rpm -q epel-release &>/dev/null; then
+        _yellow "Installing epel-release for EPEL…"
+        _yellow "正在安装 epel-release 以启用 EPEL…"
+        $PACKAGETYPE_INSTALL epel-release || {
+            _red "Failed to install epel-release, skipping EPEL step"
+            _red "安装 epel-release 失败，跳过 EPEL 步骤"
+        }
+    fi
+    if command -v yum &>/dev/null; then
+        $PACKAGETYPE_INSTALL yum-config-manager
+        _yellow "Enabling CRB repo via yum-config-manager…"
+        _yellow "通过 yum-config-manager 启用 CRB 源…"
+        yum-config-manager --set-enabled crb || {
+            _red "Failed to enable CRB via yum"
+            _red "启用 CRB（yum）失败"
+        }
+    elif command -v dnf &>/dev/null; then
+        _yellow "Enabling CRB repo via dnf config‑manager…"
+        _yellow "通过 dnf config‑manager 启用 CRB 源…"
+        dnf config-manager --set-enabled crb || {
+            _red "Failed to enable CRB via dnf"
+            _red "启用 CRB（dnf）失败"
+        }
+    fi
+    _yellow "Re-trying installation of $pkg…"
+    _yellow "正在重试安装 $pkg…"
+    if $PACKAGETYPE_INSTALL "$pkg"; then
+        _green "$pkg has been installed (with EPEL/CRB)"
+        _green "$pkg 安装成功（利用 EPEL/CRB）"
+        return 0
+    fi
+    if command -v pip3 &>/dev/null; then
+        _yellow "Attempting pip3 install for $pkg…"
+        _yellow "尝试通过 pip3 安装 $pkg…"
+        if pip3 install --user "$pkg"; then
+            _green "$pkg installed via pip3 (in ~/.local/bin)"
+            _green "$pkg 已通过 pip3 安装（位于 ~/.local/bin）"
+            return 0
+        fi
+    fi
+    _red "ERROR: Unable to install $pkg – please check repos or install manually"
+    _red "错误：无法安装 $pkg，请检查仓库或手动安装"
+    return 1
 }
 
 # 检查CDN
