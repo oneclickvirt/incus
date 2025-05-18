@@ -640,15 +640,17 @@ setup_iptables() {
 }
 
 configure_uid_gid() {
-    USER_NAME="root"
     UID_RANGE="100000:65536"
-    for FILE in /etc/subuid /etc/subgid; do
-        LINE="${USER_NAME}:${UID_RANGE}"
-        if ! grep -q "^${LINE}$" "$FILE"; then
-            echo "$LINE" | sudo tee -a "$FILE"
-        else
-            echo "$FILE already contains: $LINE"
-        fi
+    USERS=("root" "$USER")
+    for USER_NAME in "${USERS[@]}"; do
+        for FILE in /etc/subuid /etc/subgid; do
+            LINE="${USER_NAME}:${UID_RANGE}"
+            if ! grep -q "^${LINE}$" "$FILE"; then
+                echo "$LINE" | sudo tee -a "$FILE"
+            else
+                echo "$FILE already contains: $LINE"
+            fi
+        done
     done
 }
 
@@ -678,10 +680,8 @@ main() {
     copy_scripts_to_system
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
-    _green "If you need to turn on more than 100 cts, it is recommended to wait for a few minutes before performing a reboot to reboot the machine to make the settings take effect"
-    _green "The reboot will ensure that the DNS detection mechanism takes effect, otherwise the batch opening process may cause the host's DNS to be overwritten by the merchant's preset"
-    _green "如果你需要开启超过100个小鸡，建议等待几分钟后执行 reboot 重启本机以使得设置生效"
-    _green "重启后可以保证DNS的检测机制生效，否则批量开启过程中可能导致宿主机的DNS被商家预设覆盖，所以最好重启系统一次"
+    _green "You must reboot the machine to ensure user permissions are properly loaded."
+    _green "必须重启本机以保证用户权限正确加载。"
 }
 
 main
