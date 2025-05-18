@@ -400,36 +400,30 @@ init_storage_backend() {
         $PACKAGETYPE_INSTALL btrfs-progs
         record_installed_storage "btrfs"
         modprobe btrfs || true
-        if ! grep -q btrfs /proc/filesystems; then
-            _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
-            _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" >/usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
+        _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
+        _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
+        echo "$backend" >/usr/local/bin/incus_reboot
+        need_reboot=true
     elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" ] && ! command -v lvm >/dev/null; then
         _yellow "正在安装 lvm2..."
         _yellow "Installing lvm2..."
         $PACKAGETYPE_INSTALL lvm2
         record_installed_storage "lvm"
         modprobe dm-mod || true
-        if ! grep -q dm-mod /proc/modules; then
-            _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
-            _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" >/usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
+        _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
+        _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
+        echo "$backend" >/usr/local/bin/incus_reboot
+        need_reboot=true
     elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" ] && ! command -v zfs >/dev/null; then
         _yellow "正在安装 zfsutils-linux..."
         _yellow "Installing zfsutils-linux..."
         $PACKAGETYPE_INSTALL zfsutils-linux
         record_installed_storage "zfs"
         modprobe zfs || true
-        if ! grep -q zfs /proc/filesystems; then
-            _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
-            _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
-            echo "$backend" >/usr/local/bin/incus_reboot
-            need_reboot=true
-        fi
+        _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
+        _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
+        echo "$backend" >/usr/local/bin/incus_reboot
+        need_reboot=true
     elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" ] && ! command -v ceph >/dev/null; then
         _yellow "正在安装 ceph-common..."
         _yellow "Installing ceph-common..."
