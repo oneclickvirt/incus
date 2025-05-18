@@ -399,6 +399,14 @@ configure_network() {
         incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
         incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
     fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port=$sshn/tcp
+        if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
+            firewall-cmd --permanent --add-port=$nat1-$nat2/tcp
+            firewall-cmd --permanent --add-port=$nat1-$nat2/udp
+        fi
+        firewall-cmd --reload
+    fi
     incus stop "$name"
     if ((in == out)); then
         speed_limit="$in"
