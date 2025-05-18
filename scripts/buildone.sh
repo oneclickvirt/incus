@@ -298,6 +298,7 @@ setup_container() {
     passwd=${ori:2:9}
     incus start "$name"
     sleep 3
+    chmod 777 /usr/local/bin/check-dns.sh
     /usr/local/bin/check-dns.sh
     sleep 3
     if [ "$fixed_system" = false ]; then
