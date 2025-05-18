@@ -570,14 +570,6 @@ configure_incus_settings() {
     incus network set incusbr0 dns.mode managed
     incus network set incusbr0 ipv4.dhcp true
     incus network set incusbr0 ipv6.dhcp true
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow in on incusbr0
-        ufw route allow in on incusbr0
-        ufw route allow out on incusbr0
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
-        firewall-cmd --reload
-    fi
 }
 
 optimize_system() {
@@ -626,6 +618,11 @@ install_dns_checker() {
 }
 
 setup_iptables() {
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow in on incusbr0
+        ufw route allow in on incusbr0
+        ufw route allow out on incusbr0
+    fi
     if command -v apt >/dev/null 2>&1; then
         install_package iptables
         install_package iptables-persistent || true
@@ -633,6 +630,7 @@ setup_iptables() {
         netfilter-persistent save || true
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --zone=public --add-masquerade
+        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
         firewall-cmd --reload
     else
         echo "Unsupported system: no iptables-persistent or firewall-cmd found"
