@@ -41,8 +41,7 @@ backup_file() {
 set_ipv4_precedence_gai() {
     echo "配置 IPv4 优先，修改 $GAI_CONF"
     if [ ! -f "$GAI_CONF" ]; then
-        echo "$GAI_CONF 不存在，跳过 IPv4 优先设置。"
-        return
+        touch "$GAI_CONF"
     fi
     if grep -q "^precedence ::ffff:0:0/96  100" "$GAI_CONF"; then
         echo "$GAI_CONF 中 IPv4 优先规则已存在。"
@@ -134,7 +133,6 @@ elif check_resolvectl && systemctl is-active --quiet systemd-resolved; then
         resolvectl domain "$IFACE" "spiritlhl.net"
         echo "DNS 配置已更新。"
     fi
-    echo "提示：IPv4优先建议通过修改 /etc/gai.conf 来实现"
 else
     echo "未检测到 NetworkManager 或 systemd-resolved，准备直接修改 /etc/resolv.conf"
     backup_resolv_conf
