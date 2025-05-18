@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2025.01.30
+# 2025.05.18
 
 # 输入
 # ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
@@ -100,7 +100,35 @@ check_cdn_file() {
     fi
 }
 
-# 读取输入
+retry_curl() {
+    local url="$1"
+    local max_attempts=5
+    local delay=1
+    _retry_result=""
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        _retry_result=$(curl -slk -m 6 "$url")
+        if [ $? -eq 0 ] && [ -n "$_retry_result" ]; then
+            return 0
+        fi
+        sleep "$delay"
+        delay=$((delay * 2))
+    done
+    return 1
+}
+    
+retry_wget() {
+        local url="$1"
+        local filename="$2"
+        local max_attempts=5
+        local delay=1
+        for ((attempt=1; attempt<=max_attempts; attempt++)); do
+            wget -q "$url" -O "$filename" && return 0
+            sleep "$delay"
+            delay=$((delay * 2))
+        done
+        return 1
+}
+
 name="${1:-test}"
 cpu="${2:-1}"
 memory="${3:-256}"
@@ -138,28 +166,19 @@ check_cdn_file
 image_download_url=""
 fixed_system=false
 if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-    # response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/oneclickvirt/incus_images/releases/tags/${a}")
-    # if [ $? -ne 0 ]; then
-    #     response=$(curl -m 6 -s -H "Accept: application/vnd.github.v3+json" "https://githubapi.spiritlhl.top/repos/oneclickvirt/incus_images/releases/tags/${a}")
-    # fi
-    # assets_count=$(echo "$response" | jq '.assets | length')
-    # for ((i=0; i<assets_count; i++)); do
-        # image_name=$(echo "$response" | jq -r ".assets[$i].name")
-    self_fixed_images=($(curl -slk -m 6 ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt))
+    retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt"
+    self_fixed_images=(${_retry_result})
     for image_name in "${self_fixed_images[@]}"; do
         if [ -z "${b}" ]; then
-            # 若无版本号，则仅识别系统名字匹配第一个链接，放宽系统识别
             if [[ "$image_name" == "${a}"* ]]; then
                 fixed_system=true
-                # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
                 image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
                 image_alias_output=$(incus image alias list)
                 if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                    wget "${cdn_success_url}${image_download_url}"
+                    retry_wget "${cdn_success_url}${image_download_url}" "$image_name"
                     chmod 777 "$image_name"
                     unzip "$image_name"
                     rm -rf "$image_name"
-                    # 导入为对应镜像
                     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
                     rm -rf incus.tar.xz rootfs.squashfs
                     echo "A matching image exists and will be created using ${image_download_url}"
@@ -168,18 +187,15 @@ if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
                 break
             fi
         else
-            # 有版本号，精确识别系统
             if [[ "$image_name" == "${a}_${b}"* ]]; then
                 fixed_system=true
-                # image_download_url=$(echo "$response" | jq -r ".assets[$i].browser_download_url")
                 image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
                 image_alias_output=$(incus image alias list)
                 if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                    wget "${cdn_success_url}${image_download_url}"
+                    retry_wget "${cdn_success_url}${image_download_url}" "$image_name"
                     chmod 777 "$image_name"
                     unzip "$image_name"
                     rm -rf "$image_name"
-                    # 导入为对应镜像
                     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
                     rm -rf incus.tar.xz rootfs.squashfs
                     echo "A matching image exists and will be created using ${image_download_url}"
