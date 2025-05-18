@@ -91,7 +91,7 @@ setup_container() {
         incus exec "$name" -- apt-get install curl -y --fix-missing
         incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
         incus exec "$name" -- chmod 777 ChangeMirrors.sh
-        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips
+        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
         incus exec "$name" -- rm -rf ChangeMirrors.sh
     fi
     incus exec "$name" -- sudo apt-get update -y

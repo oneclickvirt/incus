@@ -96,7 +96,7 @@ configure_china_mirrors() {
   incus exec "$container_name" -- apt-get install curl -y --fix-missing
   incus exec "$container_name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
   incus exec "$container_name" -- chmod 777 ChangeMirrors.sh
-  incus exec "$container_name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips
+  incus exec "$container_name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
   incus exec "$container_name" -- rm -rf ChangeMirrors.sh
 }
 
