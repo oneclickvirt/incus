@@ -366,6 +366,9 @@ setup_network_device_ipv6() {
         curl -LO "$SIPCALC_URL"
         sudo dnf install -y "./$(basename "$SIPCALC_URL")"
         rm -f "./$(basename "$SIPCALC_URL")"
+        if ! command -v sipcalc >/dev/null 2>&1; then
+            install_package sipcalc
+        fi
     else
         install_package sipcalc
     fi
