@@ -330,6 +330,8 @@ setup_firewall() {
         systemctl stop firewalld || true
         systemctl disable firewalld || true
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        systemctl stop firewalld || true
+        systemctl disable firewalld || true
         install_package iptables-services
         install_package epel-release
         systemctl enable iptables
