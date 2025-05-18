@@ -16,25 +16,32 @@ detect_os() {
             fi
             PACKAGETYPE="apt"
             PACKAGETYPE_INSTALL="apt install -y"
+            PACKAGETYPE_UPDATE="apt update -y"
+            PACKAGETYPE_REMOVE="apt remove -y"
             ;;
         debian)
             OS="$ID"
             VERSION="$VERSION_CODENAME"
             PACKAGETYPE="apt"
             PACKAGETYPE_INSTALL="apt install -y"
+            PACKAGETYPE_UPDATE="apt update -y"
+            PACKAGETYPE_REMOVE="apt remove -y"
             ;;
         kali)
             OS="debian"
             PACKAGETYPE="apt"
             PACKAGETYPE_INSTALL="apt install -y"
+            PACKAGETYPE_UPDATE="apt update -y"
+            PACKAGETYPE_REMOVE="apt remove -y"
             YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
             ;;
-        centos)
+        centos | almalinux | rocky)
             OS="$ID"
             VERSION="$VERSION_ID"
             PACKAGETYPE="dnf"
             PACKAGETYPE_INSTALL="dnf install -y"
-            if [ "$VERSION" = "7" ]; then
+            PACKAGETYPE_REMOVE="dnf remove -y"
+            if [[ "$VERSION" =~ ^7 ]]; then
                 PACKAGETYPE="yum"
             fi
             ;;
@@ -43,12 +50,18 @@ detect_os() {
             VERSION="" # rolling release
             PACKAGETYPE="pacman"
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+            PACKAGETYPE_UPDATE="pacman -Sy"
+            PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+            PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
             ;;
         manjaro | manjaro-arm)
             OS="manjaro"
             VERSION="" # rolling release
             PACKAGETYPE="pacman"
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+            PACKAGETYPE_UPDATE="pacman -Sy"
+            PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+            PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
             ;;
         esac
     fi
