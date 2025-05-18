@@ -353,7 +353,7 @@ setup_network_device_ipv6() {
     local container_name=$1
     local container_ipv6=$2
     local ipv6_gateway_fe80=$3
-    if [[ "$OS" == "almalinux" && "$VERSION" =~ ^9 ]]; then
+    if [[ "$OS" == "almalinux" && "$VERSION" =~ ^9 ]] || [[ "$OS" == "rocky" && "$VERSION" =~ ^9 ]]; then
         ARCH=$(uname -m)
         if [[ "$ARCH" == "x86_64" ]]; then
             SIPCALC_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/s/sipcalc-1.1.6-17.el8.x86_64.rpm"
@@ -363,7 +363,7 @@ setup_network_device_ipv6() {
             echo "Unsupported architecture: $ARCH"
             exit 1
         fi
-        echo "AlmaLinux 9 detected — installing sipcalc from EPEL 8 ($ARCH)"
+        echo "AlmaLinux/RockyLinux 9 detected — installing sipcalc from EPEL 8 ($ARCH)"
         curl -LO "$SIPCALC_URL"
         sudo dnf install -y "./$(basename "$SIPCALC_URL")"
         rm -f "./$(basename "$SIPCALC_URL")"
