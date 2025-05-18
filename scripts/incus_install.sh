@@ -330,13 +330,12 @@ setup_firewall() {
         systemctl stop firewalld || true
         systemctl disable firewalld || true
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
-        systemctl stop firewalld || true
-        systemctl disable firewalld || true
-        install_package iptables-services
         install_package epel-release
-        systemctl enable iptables
-        systemctl start iptables
-        service iptables save
+        install_package firewalld
+        systemctl enable firewalld
+        systemctl start firewalld
+        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
+        firewall-cmd --reload
     fi
     install_package lsb_release
     install_package uidmap
@@ -566,11 +565,18 @@ configure_incus_settings() {
     incus config unset images.auto_update_interval
     incus config set images.auto_update_interval 0
     incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
+    incus network set incusbr0 ipv6.firewall false
+    incus network set incusbr0 ipv4.firewall false
     incus network set incusbr0 ipv6.address auto
     incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
     incus network set incusbr0 dns.mode managed
     incus network set incusbr0 ipv4.dhcp true
     incus network set incusbr0 ipv6.dhcp true
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow in on incusbr0
+        ufw route allow in on incusbr0
+        ufw route allow out on incusbr0
+    fi
 }
 
 optimize_system() {

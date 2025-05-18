@@ -349,7 +349,6 @@ get_ipv6_gateway_info() {
     fi
 }
 
-# 使用新增网络设备的方式映射IPv6
 setup_network_device_ipv6() {
     local container_name=$1
     local container_ipv6=$2
@@ -426,18 +425,18 @@ setup_iptables_ipv6() {
     local subnet_prefix=$3
     local ipv6_length=$4
     local interface=$5
+    local use_firewalld=false
+    if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        use_firewalld=true
+    fi
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
     check_cdn_file
     for i in $(seq 3 65535); do
         IPV6="${subnet_prefix}$i"
-        if [[ $IPV6 == $container_ipv6 ]]; then
-            continue
-        fi
-        if ip -6 addr show dev "$interface" | grep -q $IPV6; then
-            continue
-        fi
-        if ! ping6 -c1 -w1 -q $IPV6 &>/dev/null; then
-            if ! ip6tables -t nat -C PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6 &>/dev/null; then
+        [[ $IPV6 == $container_ipv6 ]] && continue
+        ip -6 addr show dev "$interface" | grep -qw "$IPV6" && continue
+        if ! ping6 -c1 -w1 -q "$IPV6" &>/dev/null; then
+            if ! ip6tables -t nat -C PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" &>/dev/null; then
                 _green "$IPV6"
                 break
             fi
@@ -450,7 +449,14 @@ setup_iptables_ipv6() {
         exit 1
     fi
     ip addr add "$IPV6"/"$ipv6_length" dev "$interface"
-    ip6tables -t nat -A PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6
+    if [ "$use_firewalld" = true ]; then
+        systemctl enable --now firewalld
+        sleep 3
+        firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d $IPV6 -j DNAT --to-destination $container_ipv6
+        firewall-cmd --reload
+    else
+        ip6tables -t nat -A PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6
+    fi
     if [ ! -f /usr/local/bin/add-ipv6.sh ]; then
         wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
         chmod +x /usr/local/bin/add-ipv6.sh
@@ -461,29 +467,24 @@ setup_iptables_ipv6() {
         wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
         chmod +x /etc/systemd/system/add-ipv6.service
         systemctl daemon-reload
-        systemctl enable add-ipv6.service
-        systemctl start add-ipv6.service
+        systemctl enable --now add-ipv6.service
     else
         echo "Service already exists. Skipping installation."
     fi
-    if [ ! -f "/etc/iptables/rules.v6" ]; then
-        touch /etc/iptables/rules.v6
-    fi
+    mkdir -p /etc/iptables
     ip6tables-save >/etc/iptables/rules.v6
     if command -v apt >/dev/null 2>&1; then
         install_package netfilter-persistent
         netfilter-persistent save
         netfilter-persistent reload
         service netfilter-persistent restart
-    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-        dnf install -y iptables-services || yum install -y iptables-services
-        systemctl enable ip6tables
-        systemctl restart ip6tables
+    elif [ "$use_firewalld" = true ]; then
+        systemctl restart firewalld
     else
-        echo "Unsupported system: neither apt nor dnf/yum found, co can not save ip6tables rules"
+        echo "Unsupported system: cannot persist ip6tables rules"
         exit 1
     fi
-    if ping6 -c 3 $IPV6 &>/dev/null; then
+    if ping6 -c 3 "$IPV6" &>/dev/null; then
         _green "$container_name The external IPV6 address of the container is $IPV6"
         _green "$container_name 容器的外网IPV6地址为 $IPV6"
     else
@@ -491,7 +492,7 @@ setup_iptables_ipv6() {
         _red "映射失败"
         exit 1
     fi
-    echo "$IPV6" >>"$container_name"_v6
+    echo "$IPV6" >>"${container_name}_v6"
 }
 
 main() {
