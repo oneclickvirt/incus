@@ -137,6 +137,11 @@ configure_port_forwarding() {
       firewall-cmd --permanent --add-port=$nat_start-$nat_end/tcp
       firewall-cmd --permanent --add-port=$nat_start-$nat_end/udp
       firewall-cmd --reload
+  elif command -v ufw >/dev/null 2>&1; then
+      ufw allow ${ssh_port}/tcp
+      ufw allow ${nat_start}:${nat_end}/tcp
+      ufw allow ${nat_start}:${nat_end}/udp
+      ufw reload
   fi
 }
 

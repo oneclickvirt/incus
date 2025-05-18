@@ -107,8 +107,11 @@ setup_container() {
     incus exec "$name" -- bash config.sh
     incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port=$ssh_port/tcp
+        firewall-cmd --permanent --add-port=$sshn/tcp
         firewall-cmd --reload
+    elif command -v ufw >/dev/null 2>&1; then
+        ufw allow ${sshn}/tcp
+        ufw reload
     fi
     echo "$name $sshn $passwd" >>log
 }
