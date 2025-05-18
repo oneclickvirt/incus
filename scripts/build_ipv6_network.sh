@@ -63,7 +63,7 @@ detect_os() {
             PACKAGETYPE="dnf"
             PACKAGETYPE_INSTALL="dnf install -y"
             PACKAGETYPE_REMOVE="dnf remove -y"
-            if [ "$VERSION" = "7" ]; then
+            if [[ "$VERSION" =~ ^7 ]]; then
                 PACKAGETYPE="yum"
             fi
             ;;
@@ -133,7 +133,7 @@ install_package() {
         }
     fi
     if command -v yum &>/dev/null; then
-        $PACKAGETYPE_INSTALL yum-config-manager
+        $PACKAGETYPE_INSTALL yum-utils
         _yellow "Enabling CRB repo via yum-config-manager…"
         _yellow "通过 yum-config-manager 启用 CRB 源…"
         yum-config-manager --set-enabled crb || {
@@ -354,7 +354,23 @@ setup_network_device_ipv6() {
     local container_name=$1
     local container_ipv6=$2
     local ipv6_gateway_fe80=$3
-    install_package sipcalc
+    if [[ "$OS" == "almalinux" && "$VERSION" =~ ^9 ]]; then
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "x86_64" ]]; then
+            SIPCALC_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/s/sipcalc-1.1.6-17.el8.x86_64.rpm"
+        elif [[ "$ARCH" == "aarch64" ]]; then
+            SIPCALC_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/aarch64/Packages/s/sipcalc-1.1.6-17.el8.aarch64.rpm"
+        else
+            echo "Unsupported architecture: $ARCH"
+            exit 1
+        fi
+        echo "AlmaLinux 9 detected — installing sipcalc from EPEL 8 ($ARCH)"
+        curl -LO "$SIPCALC_URL"
+        sudo dnf install -y "./$(basename "$SIPCALC_URL")"
+        rm -f "./$(basename "$SIPCALC_URL")"
+    else
+        install_package sipcalc
+    fi
     if [ ! -f /usr/local/bin/incus_check_ipv6 ] || [ ! -s /usr/local/bin/incus_check_ipv6 ] || [ "$(sed -e '/^[[:space:]]*$/d' /usr/local/bin/incus_check_ipv6)" = "" ]; then
         check_ipv6
     fi
