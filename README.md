@@ -4,9 +4,12 @@
 
 ## 更新
 
-2025.03.29
+2025.05.18
 
-- 修复Hits徽章访问量统计，使用 https://github.com/oneclickvirt/hitscounter
+- 模块化代码，方便后续维护
+- 添加CDN随机取值和指数回避重试使用机制，增强可靠性
+- 添加除Ubuntu/Debian系统外其他系统的适配
+- 修复IPV6网络附加时未使用CDN加速相关依赖下载的问题
 
 [更新日志](CHANGELOG.md)
 

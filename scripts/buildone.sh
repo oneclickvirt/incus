@@ -3,71 +3,86 @@
 # https://github.com/oneclickvirt/incus
 # 2025.05.18
 
-# 输入
-# ./buildone.sh 服务器名称 CPU核数 内存大小 硬盘大小 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N) 系统(留空则为debian11)
-# 如果 外网起端口 外网止端口 都设置为0则不做区间外网端口映射了，只映射基础的SSH端口，注意不能为空，不进行映射需要设置为0
-
-# 创建容器
-
-# By tailscale
-if [ -f /etc/os-release ]; then
-        # /etc/os-release populates a number of shell variables. We care about the following:
-        #  - ID: the short name of the OS (e.g. "debian", "freebsd")
-        #  - VERSION_ID: the numeric release version for the OS, if any (e.g. "18.04")
-        #  - VERSION_CODENAME: the codename of the OS release, if any (e.g. "buster")
-        #  - UBUNTU_CODENAME: if it exists, use instead of VERSION_CODENAME
+detect_os() {
+    if [ -f /etc/os-release ]; then
         . /etc/os-release
         case "$ID" in
-                ubuntu|pop|neon|zorin)
-                        OS="ubuntu"
-                        if [ "${UBUNTU_CODENAME:-}" != "" ]; then
-                            VERSION="$UBUNTU_CODENAME"
-                        else
-                            VERSION="$VERSION_CODENAME"
-                        fi
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        ;;
-                debian)
-                        OS="$ID"
-                        VERSION="$VERSION_CODENAME"
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        ;;
-                kali)
-                        OS="debian"
-                        PACKAGETYPE="apt"
-                        PACKAGETYPE_INSTALL="apt install -y"
-                        YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
-                        ;;
-                centos)
-                        OS="$ID"
-                        VERSION="$VERSION_ID"
-                        PACKAGETYPE="dnf"
-                        PACKAGETYPE_INSTALL="dnf install -y"
-                        if [ "$VERSION" = "7" ]; then
-                                PACKAGETYPE="yum"
-                        fi
-                        ;;
-                arch|archarm|endeavouros|blendos|garuda)
-                        OS="arch"
-                        VERSION="" # rolling release
-                        PACKAGETYPE="pacman"
-                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
-                        ;;
-                manjaro|manjaro-arm)
-                        OS="manjaro"
-                        VERSION="" # rolling release
-                        PACKAGETYPE="pacman"
-                        PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
-                        ;;
+        ubuntu | pop | neon | zorin)
+            OS="ubuntu"
+            if [ "${UBUNTU_CODENAME:-}" != "" ]; then
+                VERSION="$UBUNTU_CODENAME"
+            else
+                VERSION="$VERSION_CODENAME"
+            fi
+            PACKAGETYPE="apt"
+            PACKAGETYPE_INSTALL="apt install -y"
+            ;;
+        debian)
+            OS="$ID"
+            VERSION="$VERSION_CODENAME"
+            PACKAGETYPE="apt"
+            PACKAGETYPE_INSTALL="apt install -y"
+            ;;
+        kali)
+            OS="debian"
+            PACKAGETYPE="apt"
+            PACKAGETYPE_INSTALL="apt install -y"
+            YEAR="$(echo "$VERSION_ID" | cut -f1 -d.)"
+            ;;
+        centos)
+            OS="$ID"
+            VERSION="$VERSION_ID"
+            PACKAGETYPE="dnf"
+            PACKAGETYPE_INSTALL="dnf install -y"
+            if [ "$VERSION" = "7" ]; then
+                PACKAGETYPE="yum"
+            fi
+            ;;
+        arch | archarm | endeavouros | blendos | garuda)
+            OS="arch"
+            VERSION="" # rolling release
+            PACKAGETYPE="pacman"
+            PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+            ;;
+        manjaro | manjaro-arm)
+            OS="manjaro"
+            VERSION="" # rolling release
+            PACKAGETYPE="pacman"
+            PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+            ;;
         esac
-fi
+    fi
+    if [ -z "${PACKAGETYPE:-}" ]; then
+        if command -v apt >/dev/null 2>&1; then
+            PACKAGETYPE="apt"
+            PACKAGETYPE_INSTALL="apt install -y"
+            PACKAGETYPE_UPDATE="apt update -y"
+            PACKAGETYPE_REMOVE="apt remove -y"
+        elif command -v dnf >/dev/null 2>&1; then
+            PACKAGETYPE="dnf"
+            PACKAGETYPE_INSTALL="dnf install -y"
+            PACKAGETYPE_UPDATE="dnf check-update"
+            PACKAGETYPE_REMOVE="dnf remove -y"
+        elif command -v yum >/dev/null 2>&1; then
+            PACKAGETYPE="yum"
+            PACKAGETYPE_INSTALL="yum install -y"
+            PACKAGETYPE_UPDATE="yum check-update"
+            PACKAGETYPE_REMOVE="yum remove -y"
+        elif command -v pacman >/dev/null 2>&1; then
+            PACKAGETYPE="pacman"
+            PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
+            PACKAGETYPE_UPDATE="pacman -Sy"
+            PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+        fi
+    fi
+}
 
-cd /root >/dev/null 2>&1
-if ! command -v jq; then
-    $PACKAGETYPE_INSTALL jq
-fi
+install_dependencies() {
+    cd /root >/dev/null 2>&1
+    if ! command -v jq; then
+        $PACKAGETYPE_INSTALL jq
+    fi
+}
 
 check_china() {
     echo "IP area being detected ......"
@@ -81,7 +96,8 @@ check_china() {
 
 check_cdn() {
     local o_url=$1
-    for cdn_url in "${cdn_urls[@]}"; do
+    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
             return
@@ -105,7 +121,7 @@ retry_curl() {
     local max_attempts=5
     local delay=1
     _retry_result=""
-    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
         _retry_result=$(curl -slk -m 6 "$url")
         if [ $? -eq 0 ] && [ -n "$_retry_result" ]; then
             return 0
@@ -115,107 +131,93 @@ retry_curl() {
     done
     return 1
 }
-    
+
 retry_wget() {
-        local url="$1"
-        local filename="$2"
-        local max_attempts=5
-        local delay=1
-        for ((attempt=1; attempt<=max_attempts; attempt++)); do
-            wget -q "$url" -O "$filename" && return 0
-            sleep "$delay"
-            delay=$((delay * 2))
-        done
-        return 1
+    local url="$1"
+    local filename="$2"
+    local max_attempts=5
+    local delay=1
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        wget -q "$url" -O "$filename" && return 0
+        sleep "$delay"
+        delay=$((delay * 2))
+    done
+    return 1
 }
 
-name="${1:-test}"
-cpu="${2:-1}"
-memory="${3:-256}"
-disk="${4:-2}"
-sshn="${5:-20001}"
-nat1="${6:-20002}"
-nat2="${7:-20025}"
-in="${8:-10240}"
-out="${9:-10240}"
-enable_ipv6="${10:-N}"
-enable_ipv6=$(echo "$enable_ipv6" | tr '[:upper:]' '[:lower:]')
-system="${11:-debian11}"
-a="${system%%[0-9]*}"
-b="${system##*[!0-9.]}"
-sys_bit=""
-sysarch="$(uname -m)"
-case "${sysarch}" in
-"x86_64" | "x86" | "amd64" | "x64") sys_bit="x86_64" ;;
-"i386" | "i686") sys_bit="i686" ;;
-"aarch64" | "armv8" | "armv8l") sys_bit="arm64" ;;
-"armv7l") sys_bit="armv7l" ;;
-"s390x") sys_bit="s390x" ;;
-    #     "riscv64") sys_bit="riscv64";;
-"ppc64le") sys_bit="ppc64le" ;;
-    #     "ppc64") sys_bit="ppc64";;
-*) sys_bit="x86_64" ;;
-esac
+detect_arch() {
+    sysarch="$(uname -m)"
+    case "${sysarch}" in
+    "x86_64" | "x86" | "amd64" | "x64") sys_bit="x86_64" ;;
+    "i386" | "i686") sys_bit="i686" ;;
+    "aarch64" | "armv8" | "armv8l") sys_bit="arm64" ;;
+    "armv7l") sys_bit="armv7l" ;;
+    "s390x") sys_bit="s390x" ;;
+    "ppc64le") sys_bit="ppc64le" ;;
+    *) sys_bit="x86_64" ;;
+    esac
+}
 
-# 前置环境判断
-check_china
-cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
-check_cdn_file
-
-# 处理镜像是否存在，是否使用自编译、官方、第三方镜像的问题
-image_download_url=""
-fixed_system=false
-if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-    retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt"
-    self_fixed_images=(${_retry_result})
-    for image_name in "${self_fixed_images[@]}"; do
-        if [ -z "${b}" ]; then
-            if [[ "$image_name" == "${a}"* ]]; then
-                fixed_system=true
-                image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                image_alias_output=$(incus image alias list)
-                if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                    retry_wget "${cdn_success_url}${image_download_url}" "$image_name"
-                    chmod 777 "$image_name"
-                    unzip "$image_name"
-                    rm -rf "$image_name"
-                    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
-                    rm -rf incus.tar.xz rootfs.squashfs
-                    echo "A matching image exists and will be created using ${image_download_url}"
-                    echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
-                fi
-                break
-            fi
-        else
-            if [[ "$image_name" == "${a}_${b}"* ]]; then
-                fixed_system=true
-                image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                image_alias_output=$(incus image alias list)
-                if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                    retry_wget "${cdn_success_url}${image_download_url}" "$image_name"
-                    chmod 777 "$image_name"
-                    unzip "$image_name"
-                    rm -rf "$image_name"
-                    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
-                    rm -rf incus.tar.xz rootfs.squashfs
-                    echo "A matching image exists and will be created using ${image_download_url}"
-                    echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
-                fi
-                break
-            fi
-        fi
-    done
-else
-    output=$(incus image list images:${a}/${b})
-fi
-# 宿主机未识别到要下载的容器链接时
-if [ -z "$image_download_url" ]; then
-    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
-    echo "A matching image exists and will be created using images:${system}"
-    echo "匹配的镜像存在，将使用 images:${system} 进行创建"
+handle_image() {
+    image_download_url=""
     fixed_system=false
-fi
-if [ -z "$image_download_url" ] && [ -z "$system" ]; then
+    if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
+        retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt"
+        self_fixed_images=(${_retry_result})
+        for image_name in "${self_fixed_images[@]}"; do
+            if [ -z "${b}" ]; then
+                if [[ "$image_name" == "${a}"* ]]; then
+                    fixed_system=true
+                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
+                    image_alias_output=$(incus image alias list)
+                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                        import_image "$image_name" "$image_download_url"
+                        echo "A matching image exists and will be created using ${image_download_url}"
+                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+                    fi
+                    break
+                fi
+            else
+                if [[ "$image_name" == "${a}_${b}"* ]]; then
+                    fixed_system=true
+                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
+                    image_alias_output=$(incus image alias list)
+                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                        import_image "$image_name" "$image_download_url"
+                        echo "A matching image exists and will be created using ${image_download_url}"
+                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+                    fi
+                    break
+                fi
+            fi
+        done
+    else
+        output=$(incus image list images:${a}/${b})
+    fi
+    if [ -z "$image_download_url" ]; then
+        check_standard_images
+    fi
+}
+
+import_image() {
+    local image_name="$1"
+    local image_url="$2"
+    retry_wget "${cdn_success_url}${image_url}" "$image_name"
+    chmod 777 "$image_name"
+    unzip "$image_name"
+    rm -rf "$image_name"
+    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
+    rm -rf incus.tar.xz rootfs.squashfs
+}
+
+check_standard_images() {
+    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    if [ -n "$system" ]; then
+        echo "A matching image exists and will be created using images:${system}"
+        echo "匹配的镜像存在，将使用 images:${system} 进行创建"
+        fixed_system=false
+        return
+    fi
     system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna=false
@@ -229,7 +231,7 @@ if [ -z "$image_download_url" ] && [ -z "$system" ]; then
             status_tuna=false
         fi
     fi
-    if [ "$status_tuna" = false ]; then
+    if [ -z "$image_download_url" ] && [ "$status_tuna" = false ]; then
         echo "No matching image found, please execute"
         echo "incus image list images:system/version_number OR incus image list opsmaru:system/version_number"
         echo "Check if a corresponding image exists"
@@ -238,66 +240,74 @@ if [ -z "$image_download_url" ] && [ -z "$system" ]; then
         echo "查询是否存在对应镜像"
         exit 1
     fi
-fi
+}
 
-# 开始创建容器
-rm -rf "$name"
-if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-    incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
-elif [ -z "$image_download_url" ]; then
-    incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
-else
-    incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
-fi
-# --config=user.network-config="network:\n  version: 2\n  ethernets:\n    eth0:\n      nameservers:\n        addresses: [8.8.8.8, 8.8.4.4]"
-if [ $? -ne 0 ]; then
-    echo "Container creation failed, please check the previous output message"
-    echo "容器创建失败，请检查前面的输出信息"
-    exit 1
-fi
-# 硬盘大小
-if [ -f /usr/local/bin/incus_storage_type ]; then
-    storage_type=$(cat /usr/local/bin/incus_storage_type)
-else
-    storage_type="btrfs"
-fi
-if [[ $disk == *.* ]]; then
-    disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
-    incus storage create "$name" "$storage_type" size="$disk_mb"MB >/dev/null 2>&1
-    incus config device override "$name" root size="$disk_mb"MB
-    incus config device set "$name" root limits.max "$disk_mb"MB
-else
-    incus storage create "$name" "$storage_type" size="$disk"GB >/dev/null 2>&1
-    incus config device override "$name" root size="$disk"GB
-    incus config device set "$name" root limits.max "$disk"GB
-fi
-# IO
-incus config device set "$name" root limits.read 500MB
-incus config device set "$name" root limits.write 500MB
-incus config device set "$name" root limits.read 5000iops
-incus config device set "$name" root limits.write 5000iops
-# cpu
-incus config set "$name" limits.cpu.priority 0
-incus config set "$name" limits.cpu.allowance 50%
-incus config set "$name" limits.cpu.allowance 25ms/100ms
-# 内存
-incus config set "$name" limits.memory.swap true
-incus config set "$name" limits.memory.swap.priority 1
-# 支持docker虚拟化
-incus config set "$name" security.nesting true
-# 安全性防范设置 - 只有Ubuntu支持
-# if [ "$(uname -a | grep -i ubuntu)" ]; then
-#   # Set the security settings
-#   incus config set "$1" security.syscalls.intercept.mknod true
-#   incus config set "$1" security.syscalls.intercept.setxattr true
-# fi
-ori=$(date | md5sum)
-passwd=${ori:2:9}
-incus start "$name"
-sleep 3
-/usr/local/bin/check-dns.sh
-sleep 3
-if [ "$fixed_system" = false ]; then
+create_container() {
+    rm -rf "$name"
+    if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
+        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+    elif [ -z "$image_download_url" ]; then
+        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+    else
+        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+    fi
+    if [ $? -ne 0 ]; then
+        echo "Container creation failed, please check the previous output message"
+        echo "容器创建失败，请检查前面的输出信息"
+        exit 1
+    fi
+}
+
+configure_storage() {
+    if [ -f /usr/local/bin/incus_storage_type ]; then
+        storage_type=$(cat /usr/local/bin/incus_storage_type)
+    else
+        storage_type="btrfs"
+    fi
+    if [[ $disk == *.* ]]; then
+        disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
+        incus storage create "$name" "$storage_type" size="$disk_mb"MB >/dev/null 2>&1
+        incus config device override "$name" root size="$disk_mb"MB
+        incus config device set "$name" root limits.max "$disk_mb"MB
+    else
+        incus storage create "$name" "$storage_type" size="$disk"GB >/dev/null 2>&1
+        incus config device override "$name" root size="$disk"GB
+        incus config device set "$name" root limits.max "$disk"GB
+    fi
+}
+
+configure_limits() {
+    # IO
+    incus config device set "$name" root limits.read 500MB
+    incus config device set "$name" root limits.write 500MB
+    incus config device set "$name" root limits.read 5000iops
+    incus config device set "$name" root limits.write 5000iops
+    # CPU
+    incus config set "$name" limits.cpu.priority 0
+    incus config set "$name" limits.cpu.allowance 50%
+    incus config set "$name" limits.cpu.allowance 25ms/100ms
+    # Memory
+    incus config set "$name" limits.memory.swap true
+    incus config set "$name" limits.memory.swap.priority 1
+    # Enable docker virtualization
+    incus config set "$name" security.nesting true
+}
+
+setup_container() {
+    ori=$(date | md5sum)
+    passwd=${ori:2:9}
+    incus start "$name"
+    sleep 3
+    /usr/local/bin/check-dns.sh
+    sleep 3
+    if [ "$fixed_system" = false ]; then
+        setup_mirror_and_packages
+    fi
+    setup_ssh
+    configure_network
+}
+
+setup_mirror_and_packages() {
     if [[ "${CN}" == true ]]; then
         incus exec "$name" -- yum install -y curl
         incus exec "$name" -- apt-get install curl -y --fix-missing
@@ -306,7 +316,7 @@ if [ "$fixed_system" = false ]; then
         incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --close-firewall true --backup true --updata-software false --clean-cache false --ignore-backup-tips
         incus exec "$name" -- rm -rf ChangeMirrors.sh
     fi
-    if echo "$system" | grep -qiE "centos" || echo "$system" | grep -qiE "almalinux" || echo "$system" | grep -qiE "fedora" || echo "$system" | grep -qiE "rocky" || echo "$system" | grep -qiE "oracle"; then
+    if echo "$system" | grep -qiE "centos|almalinux|fedora|rocky|oracle"; then
         incus exec "$name" -- sudo yum update -y
         incus exec "$name" -- sudo yum install -y curl
         incus exec "$name" -- sudo yum install -y dos2unix
@@ -325,8 +335,17 @@ if [ "$fixed_system" = false ]; then
         incus exec "$name" -- sudo apt-get install curl -y --fix-missing
         incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
     fi
-fi
-if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
+}
+
+setup_ssh() {
+    if echo "$system" | grep -qiE "alpine|openwrt"; then
+        setup_ssh_sh
+    else
+        setup_ssh_bash
+    fi
+}
+
+setup_ssh_sh() {
     if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
         curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
         chmod 777 /usr/local/bin/ssh_sh.sh
@@ -336,7 +355,9 @@ if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; 
     incus file push /root/ssh_sh.sh "$name"/root/
     incus exec "$name" -- chmod 777 ssh_sh.sh
     incus exec "$name" -- ./ssh_sh.sh ${passwd}
-else
+}
+
+setup_ssh_bash() {
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
         curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
         chmod 777 /usr/local/bin/ssh_bash.sh
@@ -358,47 +379,79 @@ else
     incus exec "$name" -- dos2unix config.sh
     incus exec "$name" -- bash config.sh
     incus exec "$name" -- history -c
-fi
-incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
-# 是否要创建V6地址
-if [ -n "$enable_ipv6" ]; then
-    if [ "$enable_ipv6" == "y" ]; then
-        incus exec "$name" -- echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
-        sleep 1
-        if [ ! -f "./build_ipv6_network.sh" ]; then
-            # 如果不存在，则从指定 URL 下载并添加可执行权限
-            curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh
-            chmod +x build_ipv6_network.sh
+}
+
+configure_network() {
+    incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
+    if [ -n "$enable_ipv6" ]; then
+        if [ "$enable_ipv6" == "y" ]; then
+            incus exec "$name" -- echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
+            sleep 1
+            if [ ! -f "./build_ipv6_network.sh" ]; then
+                curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh
+                chmod +x build_ipv6_network.sh
+            fi
+            ./build_ipv6_network.sh "$name"
         fi
-        ./build_ipv6_network.sh "$name"
     fi
-fi
-if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-    incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
-    incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
-fi
-# 网速
-incus stop "$name"
-if ((in == out)); then
-    speed_limit="$in"
-else
-    speed_limit=$(($in > $out ? $in : $out))
-fi
-# 上传 下载 最大
-incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
-incus start "$name"
-rm -rf ssh_bash.sh config.sh ssh_sh.sh
-if echo "$system" | grep -qiE "alpine"; then
-    sleep 3
+    if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
+        incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
+        incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
+    fi
     incus stop "$name"
+    if ((in == out)); then
+        speed_limit="$in"
+    else
+        speed_limit=$(($in > $out ? $in : $out))
+    fi
+    incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
     incus start "$name"
-fi
-if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-    echo "$name $sshn $passwd $nat1 $nat2" >>"$name"
-    echo "$name $sshn $passwd $nat1 $nat2"
-    exit 1
-fi
-if [ "$nat1" == "0" ] && [ "$nat2" == "0" ]; then
-    echo "$name $sshn $passwd" >>"$name"
-    echo "$name $sshn $passwd"
-fi
+}
+
+cleanup_and_finish() {
+    rm -rf ssh_bash.sh config.sh ssh_sh.sh
+    if echo "$system" | grep -qiE "alpine"; then
+        sleep 3
+        incus stop "$name"
+        incus start "$name"
+    fi
+    if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
+        echo "$name $sshn $passwd $nat1 $nat2" >>"$name"
+        echo "$name $sshn $passwd $nat1 $nat2"
+        exit 1
+    fi
+    if [ "$nat1" == "0" ] && [ "$nat2" == "0" ]; then
+        echo "$name $sshn $passwd" >>"$name"
+        echo "$name $sshn $passwd"
+    fi
+}
+
+main() {
+    name="${1:-test}"
+    cpu="${2:-1}"
+    memory="${3:-256}"
+    disk="${4:-2}"
+    sshn="${5:-20001}"
+    nat1="${6:-20002}"
+    nat2="${7:-20025}"
+    in="${8:-10240}"
+    out="${9:-10240}"
+    enable_ipv6="${10:-N}"
+    enable_ipv6=$(echo "$enable_ipv6" | tr '[:upper:]' '[:lower:]')
+    system="${11:-debian11}"
+    a="${system%%[0-9]*}"
+    b="${system##*[!0-9.]}"
+    detect_os
+    install_dependencies
+    detect_arch
+    check_china
+    cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
+    check_cdn_file
+    handle_image
+    create_container
+    configure_storage
+    configure_limits
+    setup_container
+    cleanup_and_finish
+}
+main "$@"

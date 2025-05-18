@@ -135,8 +135,7 @@ if [ -d /etc/ssh/sshd_config.d ]; then
     done
 fi
 config_dir="/etc/ssh/sshd_config.d/"
-for file in "$config_dir"*
-do
+for file in "$config_dir"*; do
     if [ -f "$file" ] && [ -r "$file" ]; then
         if grep -q "PasswordAuthentication no" "$file"; then
             sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' "$file"

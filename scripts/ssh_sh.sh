@@ -7,14 +7,13 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 config_dir="/etc/ssh/sshd_config.d/"
-for file in "$config_dir"*
-do
-    if [ -f "$file" ] && [ -r "$file" ]; then
-        if grep -q "PasswordAuthentication no" "$file"; then
-            sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' "$file"
-            echo "File $file updated"
-        fi
+for file in "$config_dir"*; do
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    if grep -q "PasswordAuthentication no" "$file"; then
+      sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' "$file"
+      echo "File $file updated"
     fi
+  fi
 done
 if [ "$(cat /etc/os-release | grep -E '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "alpine" ]; then
   apk update
