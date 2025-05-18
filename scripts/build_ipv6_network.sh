@@ -398,6 +398,14 @@ setup_network_device_ipv6() {
         wait_for_container_stopped "$container_name"
         incus config device add "$container_name" eth1 nic nictype=routed parent=${ipv6_network_name} ipv6.address=${incus_ipv6}
         sleep 3
+        if command -v firewall-cmd >/dev/null 2>&1; then
+            firewall-cmd --permanent --zone=trusted --add-interface=${ipv6_network_name}
+            firewall-cmd --reload
+        elif command -v ufw >/dev/null 2>&1; then
+            ufw allow in on ${ipv6_network_name}
+            ufw allow out on ${ipv6_network_name}
+            ufw reload
+        fi
         incus start "$container_name"
         if [[ "${ipv6_gateway_fe80}" == "N" ]]; then
             inter=$(ls /sys/class/net/ | grep -v "$(ls /sys/devices/virtual/net/)")
