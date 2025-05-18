@@ -635,16 +635,17 @@ setup_iptables() {
 configure_uid_gid() {
     UID_RANGE="100000:65536"
     USERS=("root" "$USER")
-    for USER_NAME in "${USERS[@]}"; do
-        for FILE in /etc/subuid /etc/subgid; do
-            LINE="${USER_NAME}:${UID_RANGE}"
-            if ! grep -q "^${LINE}$" "$FILE"; then
-                echo "$LINE" | sudo tee -a "$FILE"
-            else
-                echo "$FILE already contains: $LINE"
-            fi
+    FILES=(/etc/subuid /etc/subgid)
+    for FILE in "${FILES[@]}"; do
+        sudo touch "$FILE"
+        for USER_NAME in "${USERS[@]}"; do
+            sudo sed -i "/^${USER_NAME}:[0-9]\+:[0-9]\+/d" "$FILE"
+        done
+        for USER_NAME in "${USERS[@]}"; do
+            echo "${USER_NAME}:${UID_RANGE}" | sudo tee -a "$FILE" >/dev/null
         done
     done
+    grep -E "^(root|$USER):" /etc/subuid /etc/subgid || true
 }
 
 copy_scripts_to_system() {
