@@ -491,9 +491,10 @@ setup_storage() {
     fi
     local BACKENDS=()
     if command -v apt >/dev/null; then
-        BACKENDS+=("btrfs")
+        BACKENDS=("btrfs" "lvm" "zfs" "ceph" "dir")
+    else
+        BACKENDS=("lvm" "zfs" "ceph" "dir")
     fi
-    BACKENDS+=("lvm" "zfs" "ceph" "dir")
     for backend in "${BACKENDS[@]}"; do
         if init_storage_backend "$backend"; then
             return 0
