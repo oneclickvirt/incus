@@ -270,7 +270,8 @@ wait_for_container_running() {
     local interval=3
     local elapsed_time=0
     while [ $elapsed_time -lt $timeout ]; do
-        status=$(incus info "$container_name" | grep "Status: RUNNING")
+        incus start "$container_name"
+        status=$(incus info "$container_name" | grep "RUNNING")
         if [[ "$status" == *RUNNING* ]]; then
             break
         fi
@@ -521,6 +522,8 @@ main() {
     interface=$(lshw -C network | awk '/logical name:/{print $3}' | head -1)
     _yellow "NIC $interface"
     _yellow "网卡 $interface"
+    incus start "$CONTAINER_NAME"
+    sleep 3
     wait_for_container_running "$CONTAINER_NAME"
     CONTAINER_IPV6=$(get_container_ipv6 "$CONTAINER_NAME")
     SUBNET_PREFIX=$(get_host_ipv6_prefix)
