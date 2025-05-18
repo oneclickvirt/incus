@@ -33,9 +33,14 @@ check_resolvectl() {
 
 backup_file() {
     local file=$1
-    local backup_file="${file}.bak.$(date +%F-%T)"
-    echo "备份 $file 到 $backup_file"
-    cp "$file" "$backup_file"
+    local backup_suffix=".bak.original"
+    local backup_file="${file}${backup_suffix}"
+    if [ ! -f "$backup_file" ]; then
+        echo "备份 $file 到 $backup_file"
+        cp "$file" "$backup_file"
+    else
+        echo "备份文件 $backup_file 已存在，跳过备份"
+    fi
 }
 
 set_ipv4_precedence_gai() {
@@ -68,9 +73,13 @@ adjust_nmcli_ipv6_route_metric() {
 }
 
 backup_resolv_conf() {
-    local backup_file="/etc/resolv.conf.bak.$(date +%F-%T)"
-    echo "备份 /etc/resolv.conf 到 $backup_file"
-    cp /etc/resolv.conf "$backup_file"
+    local backup_file="/etc/resolv.conf.bak.original"
+    if [ ! -f "$backup_file" ]; then
+        echo "备份 /etc/resolv.conf 到 $backup_file"
+        cp /etc/resolv.conf "$backup_file"
+    else
+        echo "备份文件 $backup_file 已存在，跳过备份"
+    fi
 }
 
 write_resolv_conf() {
