@@ -689,7 +689,9 @@ main() {
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
     _green "You must reboot the machine to ensure user permissions are properly loaded. (The machine will restart automatically after 15 seconds)"
+    _green "The first startup may take 400~500 seconds, please be patient."
     _green "必须重启本机以保证用户权限正确加载。(15秒后本机将自动重启)"
+    _green "首次启动可能耗时在400~500秒，请耐心等待"
     sleep 15 && reboot
 }
 
