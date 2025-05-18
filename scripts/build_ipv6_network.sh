@@ -352,6 +352,7 @@ setup_network_device_ipv6() {
     local container_name=$1
     local container_ipv6=$2
     local ipv6_gateway_fe80=$3
+    # https://pkgs.org/search/?q=sipcalc
     if [[ "$OS" == "almalinux" ]] || [[ "$OS" == "rocky" ]] || [[ "$OS" == "centos" ]]; then
         ARCH=$(uname -m)
         if [[ "$ARCH" == "x86_64" ]]; then
