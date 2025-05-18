@@ -453,6 +453,7 @@ init_storage_backend() {
         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
     fi
     local status=$?
+    _green "Init storage:"
     echo "$temp"
     if echo "$temp" | grep -q "incus.migrate" && [ $status -ne 0 ]; then
         incus.migrate
