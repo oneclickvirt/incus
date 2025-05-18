@@ -428,7 +428,6 @@ setup_iptables_ipv6() {
     local interface=$5
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
     check_cdn_file
-    install_package netfilter-persistent
     for i in $(seq 3 65535); do
         IPV6="${subnet_prefix}$i"
         if [[ $IPV6 == $container_ipv6 ]]; then
@@ -453,13 +452,13 @@ setup_iptables_ipv6() {
     ip addr add "$IPV6"/"$ipv6_length" dev "$interface"
     ip6tables -t nat -A PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6
     if [ ! -f /usr/local/bin/add-ipv6.sh ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/lxd/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
+        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
         chmod +x /usr/local/bin/add-ipv6.sh
     else
         echo "Script already exists. Skipping installation."
     fi
     if [ ! -f /etc/systemd/system/add-ipv6.service ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/lxd/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
+        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
         chmod +x /etc/systemd/system/add-ipv6.service
         systemctl daemon-reload
         systemctl enable add-ipv6.service
@@ -471,9 +470,19 @@ setup_iptables_ipv6() {
         touch /etc/iptables/rules.v6
     fi
     ip6tables-save >/etc/iptables/rules.v6
-    netfilter-persistent save
-    netfilter-persistent reload
-    service netfilter-persistent restart
+    if command -v apt >/dev/null 2>&1; then
+        install_package netfilter-persistent
+        netfilter-persistent save
+        netfilter-persistent reload
+        service netfilter-persistent restart
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        dnf install -y iptables-services || yum install -y iptables-services
+        systemctl enable ip6tables
+        systemctl restart ip6tables
+    else
+        echo "Unsupported system: neither apt nor dnf/yum found, co can not save ip6tables rules"
+        exit 1
+    fi
     if ping6 -c 3 $IPV6 &>/dev/null; then
         _green "$container_name The external IPV6 address of the container is $IPV6"
         _green "$container_name 容器的外网IPV6地址为 $IPV6"
