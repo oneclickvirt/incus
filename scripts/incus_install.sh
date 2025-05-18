@@ -334,8 +334,6 @@ setup_firewall() {
         install_package firewalld
         systemctl enable firewalld
         systemctl start firewalld
-        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
-        firewall-cmd --reload
     fi
     install_package lsb_release
     install_package uidmap
@@ -576,6 +574,9 @@ configure_incus_settings() {
         ufw allow in on incusbr0
         ufw route allow in on incusbr0
         ufw route allow out on incusbr0
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
+        firewall-cmd --reload
     fi
 }
 
