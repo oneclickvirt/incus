@@ -87,6 +87,7 @@ detect_os() {
         esac
     fi
     if [ -z "${PACKAGETYPE:-}" ]; then
+        OS="$ID"
         if command -v apt >/dev/null 2>&1; then
             PACKAGETYPE="apt"
             PACKAGETYPE_INSTALL="apt install -y"
@@ -358,18 +359,34 @@ setup_network_device_ipv6() {
     if [[ "$OS" == "almalinux" ]] || [[ "$OS" == "rocky" ]] || [[ "$OS" == "centos" ]]; then
         ARCH=$(uname -m)
         if [[ "$ARCH" == "x86_64" ]]; then
-            SIPCALC_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/s/sipcalc-1.1.6-17.el8.x86_64.rpm"
+            REL_PATH="x86_64/Packages/s/sipcalc-1.1.6-17.el8.x86_64.rpm"
         elif [[ "$ARCH" == "aarch64" ]]; then
-            SIPCALC_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/aarch64/Packages/s/sipcalc-1.1.6-17.el8.aarch64.rpm"
+            REL_PATH="aarch64/Packages/s/sipcalc-1.1.6-17.el8.aarch64.rpm"
         else
             echo "Unsupported architecture: $ARCH"
             exit 1
         fi
-        echo "AlmaLinux/RockyLinux 9 detected — installing sipcalc from EPEL 8 ($ARCH)"
-        curl -LO "$SIPCALC_URL"
-        sudo dnf install -y "./$(basename "$SIPCALC_URL")"
-        rm -f "./$(basename "$SIPCALC_URL")"
+        FILENAME=$(basename "$REL_PATH")
+        MIRRORS=(
+            "https://dl.fedoraproject.org/pub/epel/8/Everything/$REL_PATH"
+            "https://mirrors.aliyun.com/epel/8/Everything/$REL_PATH"
+            "https://repo.huaweicloud.com/epel/8/Everything/$REL_PATH"
+            "https://mirrors.tuna.tsinghua.edu.cn/epel/8/Everything/$REL_PATH"
+        )
+        echo "rpm detected — installing sipcalc from EPEL ($ARCH)"
+        for URL in "${MIRRORS[@]}"; do
+            echo "Trying $URL"
+            if curl -fLO "$URL"; then
+                echo "Downloaded sipcalc from: $URL"
+                break
+            else
+                echo "Failed to download from: $URL"
+            fi
+        done
+        sudo dnf install -y "./$FILENAME"
+        rm -f "./$FILENAME"
         if ! command -v sipcalc >/dev/null 2>&1; then
+            echo "sipcalc not found after install, trying fallback package installation..."
             install_package sipcalc
         fi
     else
