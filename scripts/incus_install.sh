@@ -10,7 +10,7 @@ SYS="${CMD[0]}"
 export DEBIAN_FRONTEND=noninteractive
 TRIED_STORAGE_FILE="/usr/local/bin/incus_tried_storage"
 INSTALLED_STORAGE_FILE="/usr/local/bin/incus_installed_storage"
-cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
+cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 
 init_env() {
     [[ -n $SYS ]] || exit 1

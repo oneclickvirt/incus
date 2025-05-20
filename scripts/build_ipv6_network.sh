@@ -442,7 +442,7 @@ setup_iptables_ipv6() {
     if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
         use_firewalld=true
     fi
-    cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn3.spiritlhl.net/" "http://cdn1.spiritlhl.net/" "https://ghproxy.com/" "http://cdn2.spiritlhl.net/")
+    cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
     check_cdn_file
     for i in $(seq 3 65535); do
         IPV6="${subnet_prefix}$i"
