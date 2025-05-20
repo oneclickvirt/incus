@@ -544,10 +544,28 @@ download_preconfigured_files() {
     )
     for file in "${files[@]}"; do
         filename=$(basename "$file")
-        rm -rf "$filename"
-        curl -sLk "${cdn_success_url}${file}" -o "$filename"
-        chmod 777 "$filename"
-        dos2unix "$filename"
+        rm -f "$filename"
+        attempt=1
+        max_attempts=5
+        success=0
+        while (( attempt <= max_attempts )); do
+            echo "Downloading $filename (attempt $attempt)..."
+            if curl -sLk "${cdn_success_url}${file}" -o "$filename"; then
+                chmod 777 "$filename"
+                dos2unix "$filename"
+                success=1
+                break
+            else
+                sleep_time=$((2 ** (attempt - 1))) # 1, 2, 4, 8, 16
+                echo "Download failed. Retrying in $sleep_time seconds..."
+                sleep "$sleep_time"
+                ((attempt++))
+            fi
+        done
+        if (( success == 0 )); then
+            echo "Failed to download $filename after $max_attempts attempts."
+            return 1
+        fi
     done
 }
 
