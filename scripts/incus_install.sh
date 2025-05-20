@@ -694,7 +694,6 @@ main() {
     setup_swap
     configure_incus_settings
     optimize_system
-    install_dns_checker
     setup_iptables
     configure_uid_gid
     download_preconfigured_files
@@ -704,6 +703,7 @@ main() {
     sleep 6
     systemctl stop incus
     sleep 6
+    install_dns_checker
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
     _green "You must reboot the machine to ensure user permissions are properly loaded. (The machine will restart automatically after 15 seconds)"
