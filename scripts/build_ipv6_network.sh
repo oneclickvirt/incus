@@ -383,7 +383,7 @@ setup_network_device_ipv6() {
                 echo "Failed to download from: $URL"
             fi
         done
-        sudo dnf install -y "./$FILENAME"
+        dnf install -y "./$FILENAME"
         rm -f "./$FILENAME"
         if ! command -v sipcalc >/dev/null 2>&1; then
             echo "sipcalc not found after install, trying fallback package installation..."
