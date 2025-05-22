@@ -1,6 +1,6 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
-# 2025.05.18
+# 2025.05.22
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$@\033[0m"; }
@@ -383,9 +383,14 @@ setup_network_device_ipv6() {
                 echo "Failed to download from: $URL"
             fi
         done
-        dnf install -y "./$FILENAME"
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y "./$FILENAME"
+        else
+            yum install -y "./$FILENAME"
+        fi
         rm -f "./$FILENAME"
         if ! command -v sipcalc >/dev/null 2>&1; then
+            install_package epel-release
             echo "sipcalc not found after install, trying fallback package installation..."
             install_package sipcalc
         fi
