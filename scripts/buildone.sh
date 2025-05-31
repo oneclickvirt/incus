@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2025.05.18
+# 2025.05.31
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -175,7 +175,7 @@ handle_image() {
     image_download_url=""
     fixed_system=false
     if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-        retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_fixed_images.txt"
+        retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_all_images.txt"
         self_fixed_images=(${_retry_result})
         for image_name in "${self_fixed_images[@]}"; do
             if [ -z "${b}" ]; then
