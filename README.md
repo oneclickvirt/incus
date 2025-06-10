@@ -49,11 +49,7 @@ https://github.com/spiritLHLS/ecs
 
 ## Sponsor
 
-Thanks to [dartnode](https://dartnode.com/?via=server) for providing support for images compiling test.
-
-<a href="https://dartnode.com/?via=server" target="_blank">
-  <img src="https://snaju.com/assets/img/logo_dark.svg" alt="ekire">
-</a>
+[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com/?via=server "Powered by DartNode - Free VPS for Open Source")
 
 ## Stargazers over time
 
