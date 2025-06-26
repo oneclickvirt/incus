@@ -1,0 +1,10 @@
+[Unit]
+Description=Delayed start and timed run every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=coexistence.service
+
+[Install]
+WantedBy=timers.target

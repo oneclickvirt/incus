@@ -1,0 +1,6 @@
+[Unit]
+Description=firewall reset for docker coexistence
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/coexistence.sh
