@@ -25,7 +25,7 @@ check_cdn_file() {
 }
 
 ensure_coexistence_setup() {
-    local base_url="${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts"
+    local base_url="${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/extra_scripts"
     local script_dir="/usr/local/bin"
     local systemd_dir="/etc/systemd/system"
     if [ ! -f "${script_dir}/coexistence.sh" ]; then
