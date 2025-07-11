@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2024.06.05
+# 2025.07.11
 
 if [ -f "/etc/resolv.conf" ]; then
     cp /etc/resolv.conf /etc/resolv.conf.bak
@@ -88,6 +88,7 @@ checkupdate
 install_required_modules
 sudo systemctl enable sshd
 sudo systemctl enable ssh
+ssh-keygen -A
 sleep 3
 sudo service ssh start
 sudo service sshd start
