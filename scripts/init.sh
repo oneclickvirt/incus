@@ -224,9 +224,9 @@ configure_port_forwarding() {
   local ssh_port=$2
   local nat_start=$3
   local nat_end=$4
-  incus config device add "$container_name" ssh-port proxy listen=tcp:0.0.0.0:$ssh_port connect=tcp:127.0.0.1:22
-  incus config device add "$container_name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat_start-$nat_end connect=tcp:127.0.0.1:$nat_start-$nat_end
-  incus config device add "$container_name" natudp-ports proxy listen=udp:0.0.0.0:$nat_start-$nat_end connect=udp:127.0.0.1:$nat_start-$nat_end
+  incus config device add "$container_name" ssh-port proxy listen=tcp:0.0.0.0:$ssh_port connect=tcp:127.0.0.1:22 nat=true
+  incus config device add "$container_name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat_start-$nat_end connect=tcp:127.0.0.1:$nat_start-$nat_end nat=true
+  incus config device add "$container_name" natudp-ports proxy listen=udp:0.0.0.0:$nat_start-$nat_end connect=udp:127.0.0.1:$nat_start-$nat_end nat=true
   if command -v firewall-cmd >/dev/null 2>&1; then
       firewall-cmd --permanent --add-port=$ssh_port/tcp
       firewall-cmd --permanent --add-port=$nat_start-$nat_end/tcp
