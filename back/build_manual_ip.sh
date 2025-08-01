@@ -127,7 +127,7 @@ incus exec "$name" -- chmod +x config.sh
 incus exec "$name" -- dos2unix config.sh
 incus exec "$name" -- bash config.sh
 incus exec "$name" -- history -c
-incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22 nat=true
+incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
 # 是否要创建V6地址
 if [ -n "$9" ]; then
   if [ "$9" == "Y" ]; then
@@ -139,8 +139,8 @@ if [ -n "$9" ]; then
   fi
 fi
 if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-  incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2 nat=true
-  incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2 nat=true
+  incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
+  incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
   # 生成的小鸡信息写入log并打印
   echo "$name $sshn $passwd $nat1 $nat2" >> "$name"
   echo "$name $sshn $passwd $nat1 $nat2"

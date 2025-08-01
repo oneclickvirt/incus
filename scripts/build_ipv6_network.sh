@@ -423,7 +423,7 @@ setup_network_device_ipv6() {
         incus stop "$container_name"
         sleep 3
         wait_for_container_stopped "$container_name"
-        incus config device add "$container_name" eth1 nic nictype=routed parent=${ipv6_network_name} ipv6.address=${incus_ipv6} nat=true
+        incus config device add "$container_name" eth1 nic nictype=routed parent=${ipv6_network_name} ipv6.address=${incus_ipv6}
         sleep 3
         if command -v firewall-cmd >/dev/null 2>&1; then
             firewall-cmd --permanent --zone=trusted --add-interface=${ipv6_network_name}

@@ -17,8 +17,8 @@ incus exec "$1" -- curl -L https://raw.githubusercontent.com/oneclickvirt/incus/
 incus exec "$1" -- dos2unix ssh.sh
 incus exec "$1" -- chmod +x ssh.sh
 incus exec "$1" -- sudo ./ssh.sh "$2"
-incus config device add "$1" ssh-port proxy listen=tcp:0.0.0.0:"$3" connect=tcp:127.0.0.1:22 nat=true
-incus config device add "$1" nat-ports proxy listen=tcp:0.0.0.0:"$4"-"$5" connect=tcp:127.0.0.1:"$4"-"$5" nat=true
+incus config device add "$1" ssh-port proxy listen=tcp:0.0.0.0:"$3" connect=tcp:127.0.0.1:22
+incus config device add "$1" nat-ports proxy listen=tcp:0.0.0.0:"$4"-"$5" connect=tcp:127.0.0.1:"$4"-"$5"
 echo "$2"
 rm -rf "$0"
 echo "$2"spiritlhlisyyds
