@@ -224,14 +224,14 @@ configure_port_forwarding() {
   local ssh_port=$2
   local nat_start=$3
   local nat_end=$4
-  incus restart "$name"
+  incus restart "$container_name"
   echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
   max_retries=3
   delay=5
   for ((i=1; i<=max_retries; i++)); do
       echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
       sleep $delay
-      container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
+      container_ip=$(incus list "$container_name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
       if [[ -n "$container_ip" ]]; then
           echo "Container IPv4 address: $container_ip"
           break
@@ -244,11 +244,11 @@ configure_port_forwarding() {
   fi
   ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
   echo "Host IPv4 address: $ipv4_address"
-  incus config device set "$name" eth0 ipv4.address="$container_ip"
-  incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
+  incus config device set "$container_name" eth0 ipv4.address="$container_ip"
+  incus config device add "$container_name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
   if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-      incus config device add "$name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
-      incus config device add "$name" natudp-ports proxy listen=udp:$ipv4_address:$nat1-$nat2 connect=udp:0.0.0.0:$nat1-$nat2 nat=true
+      incus config device add "$container_name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
+      incus config device add "$container_name" natudp-ports proxy listen=udp:$ipv4_address:$nat1-$nat2 connect=udp:0.0.0.0:$nat1-$nat2 nat=true
   fi
   if command -v firewall-cmd >/dev/null 2>&1; then
       firewall-cmd --permanent --add-port=$ssh_port/tcp
