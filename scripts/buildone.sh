@@ -443,6 +443,7 @@ configure_network() {
         ufw reload
     fi
     incus stop "$name"
+    sleep 0.5
     if ((in == out)); then
         speed_limit="$in"
     else

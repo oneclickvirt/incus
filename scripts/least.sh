@@ -200,7 +200,31 @@ setup_container() {
     incus exec "$name" -- chmod +x config.sh
     incus exec "$name" -- dos2unix config.sh
     incus exec "$name" -- bash config.sh
-    incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
+    incus restart "$name"
+    echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
+    max_retries=3
+    delay=5
+    for ((i=1; i<=max_retries; i++)); do
+        echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
+        sleep $delay
+        container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
+        if [[ -n "$container_ip" ]]; then
+            echo "Container IPv4 address: $container_ip"
+            break
+        fi
+        delay=$((delay * 2))
+    done
+    if [[ -z "$container_ip" ]]; then
+        echo "Error: Container failed to start or no IP address was assigned."
+        exit 1
+    fi
+    ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
+    echo "Host IPv4 address: $ipv4_address"
+    incus stop "$name"
+    sleep 0.5
+    incus config device set "$name" eth0 ipv4.address="$container_ip"
+    incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
+    incus start "$name"
     if command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-port=$sshn/tcp
         firewall-cmd --reload

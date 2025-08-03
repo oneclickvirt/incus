@@ -131,6 +131,7 @@ create_base_container() {
 
 configure_storage() {
   local prefix=$1
+  echo "Configuring storage for container: $prefix"
   if [ -f /usr/local/bin/incus_storage_type ]; then
     storage_type=$(cat /usr/local/bin/incus_storage_type)
   else
@@ -147,13 +148,16 @@ configure_storage() {
 
 configure_network() {
   local prefix=$1
-  incus config device override "$prefix" eth0 limits.egress=300Mbit
-  incus config device override "$prefix" eth0 limits.ingress=300Mbit
-  incus config device override "$prefix" eth0 limits.max=300Mbit
+  echo "Configuring network limits for container: $prefix"
+  incus config device override "$prefix" eth0 \
+    limits.egress=300Mbit \
+    limits.ingress=300Mbit \
+    limits.max=300Mbit
 }
 
 configure_resources() {
   local prefix=$1
+  echo "Configuring resource limits for container: $prefix"
   incus config set "$prefix" limits.cpu.priority 0
   incus config set "$prefix" limits.cpu.allowance 50%
   incus config set "$prefix" limits.cpu.allowance 25ms/100ms
@@ -245,12 +249,12 @@ configure_port_forwarding() {
   ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
   echo "Host IPv4 address: $ipv4_address"
   incus stop "$container_name"
-  sleep 3
+  sleep 0.5
   incus config device set "$container_name" eth0 ipv4.address="$container_ip"
-  incus config device add "$container_name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
+  incus config device add "$container_name" ssh-port proxy listen=tcp:$ipv4_address:$ssh_port connect=tcp:0.0.0.0:22 nat=true
   if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-      incus config device add "$container_name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
-      incus config device add "$container_name" natudp-ports proxy listen=udp:$ipv4_address:$nat1-$nat2 connect=udp:0.0.0.0:$nat1-$nat2 nat=true
+      incus config device add "$container_name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat_start-$nat_end connect=tcp:0.0.0.0:$nat_start-$nat_end nat=true
+      incus config device add "$container_name" natudp-ports proxy listen=udp:$ipv4_address:$nat_start-$nat_end connect=udp:0.0.0.0:$nat_start-$nat_end nat=true
   fi
   incus start "$container_name"
   if command -v firewall-cmd >/dev/null 2>&1; then
