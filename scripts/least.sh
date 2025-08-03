@@ -130,17 +130,17 @@ setup_storage() {
     else
         storage_type="btrfs"
     fi
-    incus storage create "$container_name" "$storage_type" size=200MB >/dev/null 2>&1
+    incus storage create "$container_name" "$storage_type" size=1GB >/dev/null 2>&1
 }
 
 configure_resources() {
     local container_name="$1"
-    incus config device override "$container_name" root size=500MB
+    incus config device override "$container_name" root size=1G
+    incus config device set "$container_name" root limits.max 1G
     incus config device set "$container_name" root limits.read 500MB
     incus config device set "$container_name" root limits.write 500MB
     incus config device set "$container_name" root limits.read 5000iops
     incus config device set "$container_name" root limits.write 5000iops
-    incus config device set "$container_name" root limits.max 500MB
     incus config device override "$container_name" eth0 \
                                 limits.egress=300Mbit \
                                 limits.ingress=300Mbit \
