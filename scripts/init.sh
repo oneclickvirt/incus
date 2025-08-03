@@ -136,7 +136,6 @@ configure_storage() {
   else
     storage_type="btrfs"
   fi
-  incus stop "$prefix"
   incus storage create "$prefix" "$storage_type" size=1GB >/dev/null 2>&1
   incus config device override "$prefix" root size=1GB
   incus config device set "$prefix" root limits.max 1GB
@@ -144,28 +143,23 @@ configure_storage() {
   incus config device set "$prefix" root limits.write 500MB
   incus config device set "$prefix" root limits.read 5000iops
   incus config device set "$prefix" root limits.write 5000iops
-  incus start "$prefix"
 }
 
 configure_network() {
   local prefix=$1
-  incus stop "$prefix"
   incus config device override "$prefix" eth0 limits.egress=300Mbit
   incus config device override "$prefix" eth0 limits.ingress=300Mbit
   incus config device override "$prefix" eth0 limits.max=300Mbit
-  incus start "$prefix"
 }
 
 configure_resources() {
   local prefix=$1
-  incus stop "$prefix"
   incus config set "$prefix" limits.cpu.priority 0
   incus config set "$prefix" limits.cpu.allowance 50%
   incus config set "$prefix" limits.cpu.allowance 25ms/100ms
   incus config set "$prefix" limits.memory.swap true
   incus config set "$prefix" limits.memory.swap.priority 1
   incus config set "$prefix" security.nesting true
-  incus start "$prefix"
 }
 
 block_ports() {
@@ -251,6 +245,7 @@ configure_port_forwarding() {
   ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
   echo "Host IPv4 address: $ipv4_address"
   incus stop "$container_name"
+  sleep 3
   incus config device set "$container_name" eth0 ipv4.address="$container_ip"
   incus config device add "$container_name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
   if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
