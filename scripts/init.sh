@@ -250,7 +250,12 @@ configure_port_forwarding() {
   echo "Host IPv4 address: $ipv4_address"
   incus stop "$container_name"
   sleep 0.5
-  incus config device set "$container_name" eth0 ipv4.address="$container_ip"
+  if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
+      if ! incus config device override "$name" eth0 ipv4.address="$container_ip" 2>/dev/null; then
+          echo "Error: Failed to apply ipv4.address to device 'eth0' in container '$name'." >&2
+          exit 1
+      fi
+  fi
   incus config device add "$container_name" ssh-port proxy listen=tcp:$ipv4_address:$ssh_port connect=tcp:0.0.0.0:22 nat=true
   if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
       incus config device add "$container_name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat_start-$nat_end connect=tcp:0.0.0.0:$nat_start-$nat_end nat=true
