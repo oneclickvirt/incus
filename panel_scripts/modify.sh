@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2023.12.21
+# 2025.08.03
 
 # 输入
 # ./modify.sh 服务器名称 SSH端口 外网起端口 外网止端口 下载速度 上传速度 是否启用IPV6(Y or N)
@@ -70,7 +70,26 @@ else
     incus exec "$name" -- bash config.sh
     incus exec "$name" -- history -c
 fi
-incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
+incus restart "$name"
+echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
+max_retries=3
+delay=5
+for ((i=1; i<=max_retries; i++)); do
+    echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
+    sleep $delay
+    container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
+    if [[ -n "$container_ip" ]]; then
+        echo "Container IPv4 address: $container_ip"
+        break
+    fi
+    delay=$((delay * 2))
+done
+if [[ -z "$container_ip" ]]; then
+    echo "Error: Container failed to start or no IP address was assigned."
+    exit 1
+fi
+ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
+echo "Host IPv4 address: $ipv4_address"
 # 是否要创建V6地址
 if [ -n "$7" ]; then
     if [ "$7" == "Y" ]; then
@@ -83,10 +102,6 @@ if [ -n "$7" ]; then
         ./build_ipv6_network.sh "$name"
     fi
 fi
-if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-    incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
-    incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
-fi
 # 网速
 incus stop "$name"
 if ((in == out)); then
@@ -96,6 +111,12 @@ else
 fi
 # 上传 下载 最大
 incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
+incus config device set "$name" eth0 ipv4.address="$container_ip"
+incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
+if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
+    incus config device add "$name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
+    incus config device add "$name" natudp-ports proxy listen=udp:$ipv4_address:$nat1-$nat2 connect=udp:0.0.0.0:$nat1-$nat2 nat=true
+fi
 incus start "$name"
 rm -rf ssh_bash.sh config.sh ssh_sh.sh
 if echo "$system" | grep -qiE "alpine"; then

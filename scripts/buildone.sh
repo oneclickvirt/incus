@@ -397,29 +397,24 @@ setup_ssh_bash() {
 
 configure_network() {
     incus restart "$name"
-    echo "等待容器启动完成，尝试获取容器IP地址..."
     echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
     max_retries=3
     delay=5
     for ((i=1; i<=max_retries; i++)); do
-        echo "第 $i 次尝试：等待 $delay 秒后获取容器信息..."
         echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
         sleep $delay
         container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
         if [[ -n "$container_ip" ]]; then
-            echo "容器的IPv4地址为: $container_ip"
             echo "Container IPv4 address: $container_ip"
             break
         fi
         delay=$((delay * 2))
     done
     if [[ -z "$container_ip" ]]; then
-        echo "错误：容器启动失败或未分配IP地址。"
         echo "Error: Container failed to start or no IP address was assigned."
         exit 1
     fi
     ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
-    echo "宿主的IPv4地址为: $ipv4_address"
     echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
