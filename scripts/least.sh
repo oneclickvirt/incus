@@ -141,9 +141,10 @@ configure_resources() {
     incus config device set "$container_name" root limits.read 5000iops
     incus config device set "$container_name" root limits.write 5000iops
     incus config device set "$container_name" root limits.max 300MB
-    incus config device override "$container_name" eth0 limits.egress=300Mbit
-    incus config device override "$container_name" eth0 limits.ingress=300Mbit
-    incus config device override "$container_name" eth0 limits.max=300Mbit
+    incus config device override "$container_name" eth0 \
+                                limits.egress=300Mbit \
+                                limits.ingress=300Mbit \
+                                limits.max=300Mbit
     incus config set "$container_name" limits.cpu.priority 0
     incus config set "$container_name" limits.cpu.allowance 50%
     incus config set "$container_name" limits.cpu.allowance 25ms/100ms
