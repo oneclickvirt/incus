@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2025.08.25
+# 2025.08.03
 
 detect_os() {
     if [ -f /etc/os-release ]; then
