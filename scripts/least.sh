@@ -135,8 +135,8 @@ setup_storage() {
 
 configure_resources() {
     local container_name="$1"
-    incus config device override "$container_name" root size=1G
-    incus config device set "$container_name" root limits.max 1G
+    incus config device override "$container_name" root size=1GB
+    incus config device set "$container_name" root limits.max 1GB
     incus config device set "$container_name" root limits.read 500MB
     incus config device set "$container_name" root limits.write 500MB
     incus config device set "$container_name" root limits.read 5000iops
