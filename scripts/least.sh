@@ -223,7 +223,12 @@ setup_container() {
     echo "Host IPv4 address: $ipv4_address"
     incus stop "$name"
     sleep 0.5
-    incus config device set "$name" eth0 ipv4.address="$container_ip"
+    if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
+        if ! incus config device override "$name" eth0 ipv4.address="$container_ip" 2>/dev/null; then
+            echo "Error: Failed to apply ipv4.address to device 'eth0' in container '$name'." >&2
+            exit 1
+        fi
+    fi
     incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
     incus start "$name"
     if command -v firewall-cmd >/dev/null 2>&1; then
