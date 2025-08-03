@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2025.07.25
+# 2025.08.25
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -396,7 +396,31 @@ setup_ssh_bash() {
 }
 
 configure_network() {
-    incus config device add "$name" ssh-port proxy listen=tcp:0.0.0.0:$sshn connect=tcp:127.0.0.1:22
+    incus restart "$name"
+    echo "等待容器启动完成，尝试获取容器IP地址..."
+    echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
+    max_retries=3
+    delay=5
+    for ((i=1; i<=max_retries; i++)); do
+        echo "第 $i 次尝试：等待 $delay 秒后获取容器信息..."
+        echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
+        sleep $delay
+        container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
+        if [[ -n "$container_ip" ]]; then
+            echo "容器的IPv4地址为: $container_ip"
+            echo "Container IPv4 address: $container_ip"
+            break
+        fi
+        delay=$((delay * 2))
+    done
+    if [[ -z "$container_ip" ]]; then
+        echo "错误：容器启动失败或未分配IP地址。"
+        echo "Error: Container failed to start or no IP address was assigned."
+        exit 1
+    fi
+    ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
+    echo "宿主的IPv4地址为: $ipv4_address"
+    echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
             incus exec "$name" -- echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
@@ -407,10 +431,6 @@ configure_network() {
             fi
             ./build_ipv6_network.sh "$name"
         fi
-    fi
-    if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
-        incus config device add "$name" nattcp-ports proxy listen=tcp:0.0.0.0:$nat1-$nat2 connect=tcp:127.0.0.1:$nat1-$nat2
-        incus config device add "$name" natudp-ports proxy listen=udp:0.0.0.0:$nat1-$nat2 connect=udp:127.0.0.1:$nat1-$nat2
     fi
     if command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-port=${sshn}/tcp
@@ -434,6 +454,12 @@ configure_network() {
         speed_limit=$(($in > $out ? $in : $out))
     fi
     incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
+    incus config device set "$name" eth0 ipv4.address="$container_ip"
+    incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
+    if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
+        incus config device add "$name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
+        incus config device add "$name" natudp-ports proxy listen=udp:$ipv4_address:$nat1-$nat2 connect=udp:0.0.0.0:$nat1-$nat2 nat=true
+    fi
     incus start "$name"
 }
 
