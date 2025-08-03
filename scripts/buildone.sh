@@ -450,7 +450,12 @@ configure_network() {
         speed_limit=$(($in > $out ? $in : $out))
     fi
     incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
-    incus config device set "$name" eth0 ipv4.address="$container_ip"
+    if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
+        if ! incus config device override "$name" eth0 ipv4.address="$container_ip" 2>/dev/null; then
+            echo "Error: Failed to apply ipv4.address to device 'eth0' in container '$name'." >&2
+            exit 1
+        fi
+    fi
     incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
     if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
         incus config device add "$name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
