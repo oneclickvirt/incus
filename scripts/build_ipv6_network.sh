@@ -493,13 +493,13 @@ setup_iptables_ipv6() {
         ip6tables -t nat -A PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6
     fi
     if [ ! -f /usr/local/bin/add-ipv6.sh ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
+        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
         chmod +x /usr/local/bin/add-ipv6.sh
     else
         echo "Script already exists. Skipping installation."
     fi
     if [ ! -f /etc/systemd/system/add-ipv6.service ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/spiritLHLS/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
+        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
         chmod +x /etc/systemd/system/add-ipv6.service
         systemctl daemon-reload
         systemctl enable --now add-ipv6.service
