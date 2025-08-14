@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.08.03
+# 2025.08.14
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -649,30 +649,35 @@ configure_incus_settings() {
 }
 
 optimize_system() {
-    sysctl net.ipv4.ip_forward=1
-    sysctl_path=$(which sysctl)
-    if grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        if grep -q "^#net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-            sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    SYSCTL_CONF="/etc/sysctl.conf"
+    SYSCTL_D_CONF="/etc/sysctl.d/99-custom.conf"
+    if [ -f "$SYSCTL_CONF" ]; then
+        if grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_CONF"; then
+            sed -i 's/^#\?net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' "$SYSCTL_CONF"
+        else
+            echo "net.ipv4.ip_forward=1" >>"$SYSCTL_CONF"
         fi
-    else
-        echo "net.ipv4.ip_forward=1" >>/etc/sysctl.conf
     fi
-    ${sysctl_path} -p
+    mkdir -p /etc/sysctl.d
+    if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
+        echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
+    fi
+    sysctl --system >/dev/null
     if [ -f "/etc/security/limits.conf" ]; then
-        if ! grep -q "*          hard    nproc       unlimited" /etc/security/limits.conf; then
+        grep -q "*          hard    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
-        fi
-        if ! grep -q "*          soft    nproc       unlimited" /etc/security/limits.conf; then
+        grep -q "*          soft    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          soft    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
-        fi
     fi
     if [ -f "/etc/systemd/logind.conf" ]; then
-        if ! grep -q "UserTasksMax=infinity" /etc/systemd/logind.conf; then
+        grep -q "^UserTasksMax=infinity" /etc/systemd/logind.conf || \
             echo 'UserTasksMax=infinity' | sudo tee -a /etc/systemd/logind.conf
-        fi
     fi
-    sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf && systemctl restart networking
+    if [ -f "/etc/gai.conf" ]; then
+        sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf
+        systemctl restart networking 2>/dev/null || true
+    fi
 }
 
 install_dns_checker() {

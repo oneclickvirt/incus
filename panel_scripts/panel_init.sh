@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.06.03
+# 2025.08.14
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -99,16 +99,23 @@ done
 cp /root/ssh_sh.sh /usr/local/bin
 cp /root/ssh_bash.sh /usr/local/bin
 cp /root/config.sh /usr/local/bin
-sysctl net.ipv4.ip_forward=1
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl_path=$(which sysctl)
-if grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-    if grep -q "^#net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+if [ -f "/etc/sysctl.conf" ]; then
+    if grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+        # 如果被注释，去掉注释
+        sed -i 's/^#\?net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    else
+        # 没有则追加
+        echo "net.ipv4.ip_forward=1" >>/etc/sysctl.conf
     fi
-else
-    echo "net.ipv4.ip_forward=1" >>/etc/sysctl.conf
 fi
-${sysctl_path} -p
+SYSCTL_D_CONF="/etc/sysctl.d/99-custom.conf"
+mkdir -p /etc/sysctl.d
+if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
+    echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
+fi
+${sysctl_path} --system >/dev/null
 incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
 incus network set incusbr0 dns.mode managed
 # managed none dynamic
