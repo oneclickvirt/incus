@@ -175,3 +175,8 @@ incus config set core.https_address :8443
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/modify.sh -O /root/modify.sh
 chmod 777 /root/modify.sh
 ufw disable || true
+incus remote list
+incus remote remove spiritlhl
+incus remote add spiritlhl https://incusimages.spiritlhl.net --protocol simplestreams --public
+incus image list spiritlhl:debian
+incus remote list
