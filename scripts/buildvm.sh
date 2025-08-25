@@ -195,9 +195,9 @@ detect_arch() {
 
 get_kvm_images() {
     local api_urls=(
+        "https://githubapi.spiritlhl.top"
         "https://api.github.com"
         "https://githubapi.spiritlhl.workers.dev"
-        "https://githubapi.spiritlhl.top"
     )
     for api_url in "${api_urls[@]}"; do
         local response=$(curl -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
