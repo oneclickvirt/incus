@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# from
-# https://github.com/oneclickvirt/incus
-# 2025.08.25
 
 check_vm_support() {
     echo "Checking if Incus supports virtual machines..."
@@ -319,31 +316,23 @@ check_standard_images() {
 
 create_vm() {
     rm -rf "$name"
-    if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-        incus init opsmaru:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
-    elif [ -z "$image_download_url" ]; then
-        incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+    if [[ $disk == *.* ]]; then
+        disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
+        disk_size="${disk_mb}MiB"
     else
-        incus init "$system" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        disk_size="${disk}GiB"
+    fi
+    if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
+        incus init opsmaru:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="$disk_size"
+    elif [ -z "$image_download_url" ]; then
+        incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="$disk_size"
+    else
+        incus init "$system" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="$disk_size"
     fi
     if [ $? -ne 0 ]; then
         echo "VM creation failed, please check the previous output message"
         echo "虚拟机创建失败，请检查前面的输出信息"
         exit 1
-    fi
-}
-
-configure_storage() {
-    if [ -f /usr/local/bin/incus_storage_type ]; then
-        storage_type=$(cat /usr/local/bin/incus_storage_type)
-    else
-        storage_type="btrfs"
-    fi
-    if [[ $disk == *.* ]]; then
-        disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
-        incus config device override "$name" root size="$disk_mb"MB
-    else
-        incus config device override "$name" root size="$disk"GB
     fi
 }
 
@@ -547,7 +536,6 @@ main() {
     check_cdn_file
     handle_image
     create_vm
-    configure_storage
     configure_limits
     setup_vm
     cleanup_and_finish
