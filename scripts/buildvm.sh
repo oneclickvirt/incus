@@ -200,7 +200,7 @@ get_kvm_images() {
         "https://githubapi.spiritlhl.workers.dev"
     )
     for api_url in "${api_urls[@]}"; do
-        local response=$(curl -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
+        local response=$(curl -4 -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
         if [ $? -eq 0 ] && echo "$response" | jq -e '.assets' >/dev/null 2>&1; then
             echo "$response" | jq -r '.assets[].name'
             return 0
