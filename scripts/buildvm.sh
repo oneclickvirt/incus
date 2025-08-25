@@ -3,6 +3,28 @@
 # https://github.com/oneclickvirt/incus
 # 2025.08.25
 
+check_vm_support() {
+    echo "Checking if Incus supports virtual machines..."
+    echo "检查Incus是否支持虚拟机..."
+    if ! command -v incus >/dev/null 2>&1; then
+        echo "Error: Incus is not installed or not in PATH"
+        echo "错误：Incus未安装或不在PATH中"
+        exit 1
+    fi
+    local drivers=$(incus info | grep -i "driver:")
+    echo "Available drivers: $drivers"
+    echo "可用驱动: $drivers"
+    if ! echo "$drivers" | grep -qi "qemu"; then
+        echo "Error: Incus does not support virtual machines (qemu driver not found)"
+        echo "错误：Incus不支持虚拟机（未找到qemu驱动）"
+        echo "Only LXC containers are supported on this system"
+        echo "此系统仅支持LXC容器"
+        exit 1
+    fi
+    echo "VM support confirmed - qemu driver is available"
+    echo "已确认支持虚拟机 - qemu驱动可用"
+}
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -177,9 +199,8 @@ get_kvm_images() {
         "https://githubapi.spiritlhl.workers.dev"
         "https://githubapi.spiritlhl.top"
     )
-    
     for api_url in "${api_urls[@]}"; do
-        local response=$(curl -s -m 10 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
+        local response=$(curl -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
         if [ $? -eq 0 ] && echo "$response" | jq -e '.assets' >/dev/null 2>&1; then
             echo "$response" | jq -r '.assets[].name'
             return 0
@@ -199,10 +220,8 @@ handle_image() {
             echo "获取KVM镜像列表失败"
             exit 1
         fi
-        
         local target_images=()
         local cloud_images=()
-        
         for image_name in "${kvm_images[@]}"; do
             if [ -z "${b}" ]; then
                 if [[ "$image_name" == "${a}"*"${sys_bit}"*"kvm.zip" ]]; then
@@ -220,14 +239,12 @@ handle_image() {
                 fi
             fi
         done
-        
         local selected_image=""
         if [ ${#cloud_images[@]} -gt 0 ]; then
             selected_image="${cloud_images[0]}"
         elif [ ${#target_images[@]} -gt 0 ]; then
             selected_image="${target_images[0]}"
         fi
-        
         if [ -n "$selected_image" ]; then
             fixed_system=true
             image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/kvm_images/${selected_image}"
@@ -239,7 +256,6 @@ handle_image() {
             fi
         fi
     fi
-    
     if [ -z "$image_download_url" ]; then
         check_standard_images
     fi
@@ -330,7 +346,6 @@ setup_vm() {
     incus start "$name"
     echo "Waiting for VM to start..."
     sleep 30
-    
     max_retries=10
     for ((i=1; i<=max_retries; i++)); do
         echo "Attempt $i: Waiting for VM to be ready..."
@@ -339,11 +354,9 @@ setup_vm() {
         fi
         sleep 10
     done
-    
     chmod 777 /usr/local/bin/check-dns.sh
     /usr/local/bin/check-dns.sh
     sleep 3
-    
     if [ "$fixed_system" = false ]; then
         setup_mirror_and_packages
     fi
@@ -466,7 +479,6 @@ configure_network() {
     fi
     incus config device override "$name" enp5s0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit 2>/dev/null || \
     incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
-    
     if ! incus config device set "$name" enp5s0 ipv4.address "$vm_ip" 2>/dev/null; then
         if ! incus config device override "$name" enp5s0 ipv4.address="$vm_ip" 2>/dev/null; then
             if ! incus config device set "$name" eth0 ipv4.address "$vm_ip" 2>/dev/null; then
@@ -499,6 +511,7 @@ cleanup_and_finish() {
 }
 
 main() {
+    check_vm_support
     name="${1:-test}"
     cpu="${2:-1}"
     memory="${3:-512}"
