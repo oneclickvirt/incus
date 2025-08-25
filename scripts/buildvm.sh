@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# from
+# https://github.com/oneclickvirt/incus
+# 2025.08.25
+
 
 check_vm_support() {
     echo "Checking if Incus supports virtual machines..."
