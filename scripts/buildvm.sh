@@ -470,8 +470,10 @@ configure_network() {
         fi
         ufw reload
     fi
+    echo "Will wait 15 seconds for the virtual machine to shut down for subsequent configuration"
+    sleep 15
     incus stop "$name"
-    sleep 0.5
+    sleep 5
     if ((in == out)); then
         speed_limit="$in"
     else
