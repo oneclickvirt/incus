@@ -173,7 +173,9 @@ retry_wget() {
     local max_attempts=5
     local delay=1
     for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        wget -q "$url" -O "$filename" && return 0
+        echo "Downloading $filename (attempt $attempt/$max_attempts)..."
+        echo "正在下载 $filename (尝试 $attempt/$max_attempts)..."
+        wget --progress=bar:force "$url" -O "$filename" && return 0
         sleep "$delay"
         delay=$((delay * 2))
     done
@@ -248,6 +250,7 @@ handle_image() {
         if [ -n "$selected_image" ]; then
             fixed_system=true
             image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/kvm_images/${selected_image}"
+            system="$selected_image"
             image_alias_output=$(incus image alias list)
             if [[ "$image_alias_output" != *"$selected_image"* ]]; then
                 import_image "$selected_image" "$image_download_url"
