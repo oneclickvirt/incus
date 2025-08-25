@@ -603,7 +603,7 @@ download_preconfigured_files() {
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh"
-        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildone.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildct.sh"
     )
     for file in "${files[@]}"; do
         filename=$(basename "$file")
