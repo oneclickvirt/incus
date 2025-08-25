@@ -47,7 +47,7 @@ detect_os() {
             ;;
         arch | archarm | endeavouros | blendos | garuda)
             OS="arch"
-            VERSION="" # rolling release
+            VERSION=""
             PACKAGETYPE="pacman"
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
             PACKAGETYPE_UPDATE="pacman -Sy"
@@ -56,7 +56,7 @@ detect_os() {
             ;;
         manjaro | manjaro-arm)
             OS="manjaro"
-            VERSION="" # rolling release
+            VERSION=""
             PACKAGETYPE="pacman"
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
             PACKAGETYPE_UPDATE="pacman -Sy"
@@ -171,42 +171,75 @@ detect_arch() {
     esac
 }
 
+get_kvm_images() {
+    local api_urls=(
+        "https://api.github.com"
+        "https://githubapi.spiritlhl.workers.dev"
+        "https://githubapi.spiritlhl.top"
+    )
+    
+    for api_url in "${api_urls[@]}"; do
+        local response=$(curl -s -m 10 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
+        if [ $? -eq 0 ] && echo "$response" | jq -e '.assets' >/dev/null 2>&1; then
+            echo "$response" | jq -r '.assets[].name'
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 handle_image() {
     image_download_url=""
     fixed_system=false
     if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-        retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_all_images.txt"
-        self_fixed_images=(${_retry_result})
-        for image_name in "${self_fixed_images[@]}"; do
+        local kvm_images=($(get_kvm_images))
+        if [ ${#kvm_images[@]} -eq 0 ]; then
+            echo "Failed to get KVM images list"
+            echo "获取KVM镜像列表失败"
+            exit 1
+        fi
+        
+        local target_images=()
+        local cloud_images=()
+        
+        for image_name in "${kvm_images[@]}"; do
             if [ -z "${b}" ]; then
-                if [[ "$image_name" == "${a}"* ]]; then
-                    fixed_system=true
-                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                    image_alias_output=$(incus image alias list)
-                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                        import_image "$image_name" "$image_download_url"
-                        echo "A matching image exists and will be created using ${image_download_url}"
-                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+                if [[ "$image_name" == "${a}"*"${sys_bit}"*"kvm.zip" ]]; then
+                    target_images+=("$image_name")
+                    if [[ "$image_name" == *"cloud"* ]]; then
+                        cloud_images+=("$image_name")
                     fi
-                    break
                 fi
             else
-                if [[ "$image_name" == "${a}_${b}"* ]]; then
-                    fixed_system=true
-                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                    image_alias_output=$(incus image alias list)
-                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                        import_image "$image_name" "$image_download_url"
-                        echo "A matching image exists and will be created using ${image_download_url}"
-                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+                if [[ "$image_name" == "${a}_${b}"*"${sys_bit}"*"kvm.zip" ]]; then
+                    target_images+=("$image_name")
+                    if [[ "$image_name" == *"cloud"* ]]; then
+                        cloud_images+=("$image_name")
                     fi
-                    break
                 fi
             fi
         done
-    else
-        output=$(incus image list images:${a}/${b})
+        
+        local selected_image=""
+        if [ ${#cloud_images[@]} -gt 0 ]; then
+            selected_image="${cloud_images[0]}"
+        elif [ ${#target_images[@]} -gt 0 ]; then
+            selected_image="${target_images[0]}"
+        fi
+        
+        if [ -n "$selected_image" ]; then
+            fixed_system=true
+            image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/kvm_images/${selected_image}"
+            image_alias_output=$(incus image alias list)
+            if [[ "$image_alias_output" != *"$selected_image"* ]]; then
+                import_image "$selected_image" "$image_download_url"
+                echo "A matching image exists and will be created using ${image_download_url}"
+                echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+            fi
+        fi
     fi
+    
     if [ -z "$image_download_url" ]; then
         check_standard_images
     fi
@@ -219,19 +252,19 @@ import_image() {
     chmod 777 "$image_name"
     unzip "$image_name"
     rm -rf "$image_name"
-    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
-    rm -rf incus.tar.xz rootfs.squashfs
+    incus image import incus.tar.xz disk.qcow2 --alias "$image_name"
+    rm -rf incus.tar.xz disk.qcow2
 }
 
 check_standard_images() {
-    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "virtual-machine" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ -n "$system" ]; then
         echo "A matching image exists and will be created using images:${system}"
         echo "匹配的镜像存在，将使用 images:${system} 进行创建"
         fixed_system=false
         return
     fi
-    system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "virtual-machine" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
     if [ $? -ne 0 ]; then
         status_tuna=false
     else
@@ -255,18 +288,18 @@ check_standard_images() {
     fi
 }
 
-create_container() {
+create_vm() {
     rm -rf "$name"
     if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init opsmaru:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
     elif [ -z "$image_download_url" ]; then
-        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
     else
-        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init "$selected_image" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
     fi
     if [ $? -ne 0 ]; then
-        echo "Container creation failed, please check the previous output message"
-        echo "容器创建失败，请检查前面的输出信息"
+        echo "VM creation failed, please check the previous output message"
+        echo "虚拟机创建失败，请检查前面的输出信息"
         exit 1
     fi
 }
@@ -279,41 +312,38 @@ configure_storage() {
     fi
     if [[ $disk == *.* ]]; then
         disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
-        incus storage create "$name" "$storage_type" size="$disk_mb"MB >/dev/null 2>&1
         incus config device override "$name" root size="$disk_mb"MB
-        incus config device set "$name" root limits.max "$disk_mb"MB
     else
-        incus storage create "$name" "$storage_type" size="$disk"GB >/dev/null 2>&1
         incus config device override "$name" root size="$disk"GB
-        incus config device set "$name" root limits.max "$disk"GB
     fi
 }
 
 configure_limits() {
-    # IO
-    incus config device set "$name" root limits.read 500MB
-    incus config device set "$name" root limits.write 500MB
-    incus config device set "$name" root limits.read 5000iops
-    incus config device set "$name" root limits.write 5000iops
-    # CPU
     incus config set "$name" limits.cpu.priority 0
-    incus config set "$name" limits.cpu.allowance 50%
-    incus config set "$name" limits.cpu.allowance 25ms/100ms
-    # Memory
     incus config set "$name" limits.memory.swap true
-    incus config set "$name" limits.memory.swap.priority 1
-    # Enable docker virtualization
-    incus config set "$name" security.nesting true
+    incus config set "$name" security.secureboot false
 }
 
-setup_container() {
+setup_vm() {
     ori=$(date | md5sum)
     passwd=${ori:2:9}
     incus start "$name"
-    sleep 3
+    echo "Waiting for VM to start..."
+    sleep 30
+    
+    max_retries=10
+    for ((i=1; i<=max_retries; i++)); do
+        echo "Attempt $i: Waiting for VM to be ready..."
+        if incus exec "$name" -- echo "VM is ready" 2>/dev/null; then
+            break
+        fi
+        sleep 10
+    done
+    
     chmod 777 /usr/local/bin/check-dns.sh
     /usr/local/bin/check-dns.sh
     sleep 3
+    
     if [ "$fixed_system" = false ]; then
         setup_mirror_and_packages
     fi
@@ -337,8 +367,6 @@ setup_mirror_and_packages() {
     elif echo "$system" | grep -qiE "alpine"; then
         incus exec "$name" -- apk update
         incus exec "$name" -- apk add --no-cache curl
-    elif echo "$system" | grep -qiE "openwrt"; then
-        incus exec "$name" -- opkg update
     elif echo "$system" | grep -qiE "archlinux"; then
         incus exec "$name" -- pacman -Sy
         incus exec "$name" -- pacman -Sy --noconfirm --needed curl
@@ -352,23 +380,7 @@ setup_mirror_and_packages() {
 }
 
 setup_ssh() {
-    if echo "$system" | grep -qiE "alpine|openwrt"; then
-        setup_ssh_sh
-    else
-        setup_ssh_bash
-    fi
-}
-
-setup_ssh_sh() {
-    if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
-        chmod 777 /usr/local/bin/ssh_sh.sh
-        dos2unix /usr/local/bin/ssh_sh.sh
-    fi
-    cp /usr/local/bin/ssh_sh.sh /root
-    incus file push /root/ssh_sh.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_sh.sh
-    incus exec "$name" -- ./ssh_sh.sh ${passwd}
+    setup_ssh_bash
 }
 
 setup_ssh_bash() {
@@ -397,21 +409,24 @@ setup_ssh_bash() {
 
 configure_network() {
     incus restart "$name"
-    echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
-    max_retries=3
-    delay=5
+    echo "Waiting for the VM to start. Attempting to retrieve the VM's IP address..."
+    max_retries=5
+    delay=10
     for ((i=1; i<=max_retries; i++)); do
-        echo "Attempt $i: Waiting $delay seconds before retrieving container info..."
+        echo "Attempt $i: Waiting $delay seconds before retrieving VM info..."
         sleep $delay
-        container_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address')
-        if [[ -n "$container_ip" ]]; then
-            echo "Container IPv4 address: $container_ip"
+        vm_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.enp5s0.addresses[]? | select(.family=="inet") | .address' 2>/dev/null)
+        if [[ -z "$vm_ip" ]]; then
+            vm_ip=$(incus list "$name" --format json | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet") | .address' 2>/dev/null)
+        fi
+        if [[ -n "$vm_ip" ]]; then
+            echo "VM IPv4 address: $vm_ip"
             break
         fi
-        delay=$((delay * 2))
+        delay=$((delay + 5))
     done
-    if [[ -z "$container_ip" ]]; then
-        echo "Error: Container failed to start or no IP address was assigned."
+    if [[ -z "$vm_ip" ]]; then
+        echo "Error: VM failed to start or no IP address was assigned."
         exit 1
     fi
     ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
@@ -449,11 +464,17 @@ configure_network() {
     else
         speed_limit=$(($in > $out ? $in : $out))
     fi
+    incus config device override "$name" enp5s0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit 2>/dev/null || \
     incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
-    if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
-        if ! incus config device override "$name" eth0 ipv4.address="$container_ip" 2>/dev/null; then
-            echo "Error: Failed to apply ipv4.address to device 'eth0' in container '$name'." >&2
-            exit 1
+    
+    if ! incus config device set "$name" enp5s0 ipv4.address "$vm_ip" 2>/dev/null; then
+        if ! incus config device override "$name" enp5s0 ipv4.address="$vm_ip" 2>/dev/null; then
+            if ! incus config device set "$name" eth0 ipv4.address "$vm_ip" 2>/dev/null; then
+                if ! incus config device override "$name" eth0 ipv4.address="$vm_ip" 2>/dev/null; then
+                    echo "Error: Failed to apply ipv4.address to network device in VM '$name'." >&2
+                    exit 1
+                fi
+            fi
         fi
     fi
     incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
@@ -466,11 +487,6 @@ configure_network() {
 
 cleanup_and_finish() {
     rm -rf ssh_bash.sh config.sh ssh_sh.sh
-    if echo "$system" | grep -qiE "alpine"; then
-        sleep 3
-        incus stop "$name"
-        incus start "$name"
-    fi
     if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
         echo "$name $sshn $passwd $nat1 $nat2" >>"$name"
         echo "$name $sshn $passwd $nat1 $nat2"
@@ -485,8 +501,8 @@ cleanup_and_finish() {
 main() {
     name="${1:-test}"
     cpu="${2:-1}"
-    memory="${3:-256}"
-    disk="${4:-2}"
+    memory="${3:-512}"
+    disk="${4:-10}"
     sshn="${5:-20001}"
     nat1="${6:-20002}"
     nat2="${7:-20025}"
@@ -504,10 +520,10 @@ main() {
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
     check_cdn_file
     handle_image
-    create_container
+    create_vm
     configure_storage
     configure_limits
-    setup_container
+    setup_vm
     cleanup_and_finish
 }
 main "$@"
