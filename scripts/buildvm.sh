@@ -317,11 +317,11 @@ check_standard_images() {
 create_vm() {
     rm -rf "$name"
     if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-        incus init opsmaru:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}MiB"
+        incus init opsmaru:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}GiB"
     elif [ -z "$image_download_url" ]; then
-        incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}MiB"
+        incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}GiB"
     else
-        incus init "$system" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}MiB"
+        incus init "$system" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk}GiB"
     fi
     if [ $? -ne 0 ]; then
         echo "VM creation failed, please check the previous output message"
