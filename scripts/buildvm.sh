@@ -250,12 +250,14 @@ handle_image() {
         if [ -n "$selected_image" ]; then
             fixed_system=true
             image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/kvm_images/${selected_image}"
-            system="$selected_image"
             image_alias_output=$(incus image alias list)
-            if [[ "$image_alias_output" != *"$selected_image"* ]]; then
+            local short_alias="${a}${b}"
+            if [[ "$image_alias_output" != *"$short_alias"* ]]; then
                 import_image "$selected_image" "$image_download_url"
                 echo "A matching image exists and will be created using ${image_download_url}"
                 echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
+            else
+                system="$short_alias"
             fi
         fi
     fi
@@ -267,12 +269,20 @@ handle_image() {
 import_image() {
     local image_name="$1"
     local image_url="$2"
+    local short_alias="${a}${b}"
+    if incus image list --format csv | grep -q "^$short_alias,"; then
+        echo "Image $short_alias already exists, skipping import"
+        echo "镜像 $short_alias 已存在，跳过导入"
+        system="$short_alias"
+        return 0
+    fi
     retry_wget "${cdn_success_url}${image_url}" "$image_name"
     chmod 777 "$image_name"
     unzip "$image_name"
     rm -rf "$image_name"
-    incus image import incus.tar.xz disk.qcow2 --alias "$image_name"
+    incus image import incus.tar.xz disk.qcow2 --alias "$short_alias"
     rm -rf incus.tar.xz disk.qcow2
+    system="$short_alias"
 }
 
 check_standard_images() {
@@ -314,7 +324,7 @@ create_vm() {
     elif [ -z "$image_download_url" ]; then
         incus init images:${system} "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
     else
-        incus init "$selected_image" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init "$system" "$name" --vm -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
     fi
     if [ $? -ne 0 ]; then
         echo "VM creation failed, please check the previous output message"
