@@ -423,8 +423,8 @@ setup_ssh_bash() {
 wait_for_vm_ready_to_shutdown() {
     echo "Waiting for VM to complete initialization..."
     echo "等待虚拟机完成初始化配置..."
-    local max_wait=15
-    local check_interval=5
+    local max_wait=18
+    local check_interval=6
     local waited=0
     while [ $waited -lt $max_wait ]; do
         if incus exec "$name" -- pgrep -f "apt|yum|pacman|apk" > /dev/null 2>&1; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2025.08.25
+# 2025.08.26
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -398,7 +398,7 @@ setup_ssh_bash() {
 wait_for_container_ready_to_shutdown() {
     echo "Waiting for container to complete initialization..."
     echo "等待容器完成初始化配置..."
-    local max_wait=12
+    local max_wait=18
     local check_interval=6
     local waited=0
     while [ $waited -lt $max_wait ]; do
