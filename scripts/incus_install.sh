@@ -154,6 +154,7 @@ install_dependencies() {
     install_package ipcalc
     install_package unzip
     install_package gpg
+    install_package bc
 }
 
 check_cdn() {
