@@ -408,13 +408,6 @@ wait_for_container_ready_to_shutdown() {
         elif incus exec "$name" -- pgrep -f "ssh|sshd|config" > /dev/null 2>&1; then
             echo "Container is executing SSH configuration, continuing to wait..."
             echo "容器正在执行SSH配置，继续等待..."
-        else
-            local load_avg=$(incus exec "$name" -- cat /proc/loadavg 2>/dev/null | awk '{print $1}' | cut -d. -f1)
-            if [ -n "$load_avg" ] && [ "$load_avg" -lt 2 ]; then
-                echo "Container load has decreased, preparing to shutdown..."
-                echo "容器负载已降低，准备关机..."
-                break
-            fi
         fi
         sleep $check_interval
         waited=$((waited + check_interval))
