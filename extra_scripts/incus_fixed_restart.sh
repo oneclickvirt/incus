@@ -89,7 +89,7 @@ install_self() {
     fi
     crontab -l 2>/dev/null | grep -q "$INSTALL_PATH"
     if [ $? -ne 0 ]; then
-        (crontab -l 2>/dev/null; echo "* * * * * $INSTALL_PATH") | crontab -
+        (crontab -l 2>/dev/null; echo "*/5 * * * * $INSTALL_PATH") | crontab -
         echo "Cron job installed"
     else
         echo "Cron job already exists"
