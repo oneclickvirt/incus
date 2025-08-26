@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.08.14
+# 2025.08.26
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -534,7 +534,6 @@ setup_storage() {
 get_user_inputs() {
     if [ "${noninteractive:-false}" = true ]; then
         available_space=$(get_available_space)
-        memory_nums=1024
         disk_nums=$((available_space - 1))
         storage_path=""
     else
@@ -576,18 +575,8 @@ get_user_inputs() {
             storage_path=""
         fi
         while true; do
-            _green "How much virtual memory does the host need to open? (Virtual memory SWAP will occupy hard disk space, calculate by yourself, note that it is MB as the unit, need 1G virtual memory then enter 1024):"
-            reading "宿主机需要开设多少虚拟内存？(虚拟内存SWAP会占用硬盘空间，自行计算，注意是MB为单位，需要1G虚拟内存则输入1024)：" memory_nums
-            if [[ "$memory_nums" =~ ^[1-9][0-9]*$ ]]; then
-                break
-            else
-                _yellow "Invalid input, please enter a positive integer."
-                _yellow "输入无效，请输入一个正整数。"
-            fi
-        done
-        while true; do
-            _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the SWAP and storage pool add up to 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
-            reading "宿主机需要开设多大的存储池？(存储池就是小鸡硬盘之和的大小，推荐SWAP和存储池加起来达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums
+            _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the storage pool reaches 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
+            reading "宿主机需要开设多大的存储池？(存储池就是容器硬盘之和的大小，推荐存储池达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums
             if [[ "$disk_nums" =~ ^[1-9][0-9]*$ ]]; then
                 break
             else
@@ -630,11 +619,6 @@ download_preconfigured_files() {
             return 1
         fi
     done
-}
-
-setup_swap() {
-    curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/swap2.sh" -o swap2.sh && chmod +x swap2.sh
-    ./swap2.sh "$memory_nums"
 }
 
 configure_incus_settings() {
@@ -759,7 +743,6 @@ main() {
     setup_firewall
     get_user_inputs
     setup_storage
-    setup_swap
     configure_incus_settings
     optimize_system
     setup_iptables
