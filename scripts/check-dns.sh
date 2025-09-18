@@ -1,6 +1,6 @@
 #!/bin/bash
 #from https://github.com/oneclickvirt/incus
-# 2025.08.03
+# 2025.09.18
 set -e
 
 DNS_SERVERS_IPV4=(
@@ -16,6 +16,7 @@ DNS_SERVERS_IPV6=(
 )
 
 GAI_CONF="/etc/gai.conf"
+RESOLVED_CONF="/etc/systemd/resolved.conf"
 
 join() {
     local IFS="$1"
@@ -104,23 +105,157 @@ backup_resolv_conf() {
 
 check_resolv_conf_symlink() {
     if [ -L "/etc/resolv.conf" ]; then
-        echo "/etc/resolv.conf 是软链接，指向 $(readlink /etc/resolv.conf)"
-        return 0
+        local target=$(readlink /etc/resolv.conf)
+        echo "/etc/resolv.conf 是软链接，指向 $target"
+        # 检查是否指向 systemd-resolved 的 stub
+        if [[ "$target" == *"systemd/resolve"* ]]; then
+            echo "检测到 systemd-resolved stub 配置"
+            return 0
+        else
+            echo "软链接指向非 systemd-resolved 目标"
+            return 1
+        fi
     else
         echo "/etc/resolv.conf 不是软链接"
         return 1
     fi
 }
 
-write_resolv_conf() {
-    if check_resolv_conf_symlink; then
-        echo "检测到 /etc/resolv.conf 是软链接，跳过直接修改"
+configure_systemd_resolved() {
+    local need_ipv4=$1
+    local need_ipv6=$2
+    
+    echo "配置 systemd-resolved..."
+    
+    # 备份配置文件
+    backup_file "$RESOLVED_CONF"
+    
+    # 构建DNS服务器列表
+    local dns_list=()
+    local fallback_dns_list=()
+    
+    if $need_ipv4; then
+        dns_list+=("${DNS_SERVERS_IPV4[@]}")
+        fallback_dns_list+=("9.9.9.9")  # Quad9 IPv4 作为备用
+    fi
+    
+    if $need_ipv6; then
+        dns_list+=("${DNS_SERVERS_IPV6[@]}")
+        fallback_dns_list+=("2620:fe::fe")  # Quad9 IPv6 作为备用
+    fi
+    
+    # 检查是否已经配置了我们的DNS设置
+    local current_dns=""
+    if grep -q "^DNS=" "$RESOLVED_CONF"; then
+        current_dns=$(grep "^DNS=" "$RESOLVED_CONF" | cut -d'=' -f2)
+    fi
+    
+    local new_dns=$(join " " "${dns_list[@]}")
+    local new_fallback_dns=$(join " " "${fallback_dns_list[@]}")
+    
+    # 如果当前配置与新配置相同，跳过
+    if [ "$current_dns" = "$new_dns" ]; then
+        echo "systemd-resolved DNS 配置已是最新，无需修改"
         return 0
     fi
+    
+    # 创建临时文件进行配置更新
+    local temp_file=$(mktemp)
+    local updated=false
+    
+    # 读取原配置文件并更新
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^#?DNS= ]]; then
+            if ! $updated; then
+                echo "DNS=$new_dns" >> "$temp_file"
+                updated=true
+            fi
+        elif [[ "$line" =~ ^#?FallbackDNS= ]]; then
+            echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+        else
+            echo "$line" >> "$temp_file"
+        fi
+    done < "$RESOLVED_CONF"
+    
+    # 如果没有找到 DNS= 行，添加到 [Resolve] 段落下
+    if ! $updated; then
+        # 重新处理文件，在 [Resolve] 段落后添加配置
+        > "$temp_file"  # 清空临时文件
+        local in_resolve_section=false
+        local dns_added=false
+        
+        while IFS= read -r line; do
+            echo "$line" >> "$temp_file"
+            if [[ "$line" == "[Resolve]" ]]; then
+                in_resolve_section=true
+            elif $in_resolve_section && [[ "$line" =~ ^\[.*\] ]] && [ "$line" != "[Resolve]" ]; then
+                # 进入了新的段落，在这之前添加DNS配置
+                if ! $dns_added; then
+                    echo "DNS=$new_dns" >> "$temp_file"
+                    echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+                    dns_added=true
+                fi
+                in_resolve_section=false
+            fi
+        done < "$RESOLVED_CONF"
+        
+        # 如果文件末尾还在 [Resolve] 段落中，添加DNS配置
+        if $in_resolve_section && ! $dns_added; then
+            echo "DNS=$new_dns" >> "$temp_file"
+            echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+        fi
+    fi
+    
+    # 应用新配置
+    mv "$temp_file" "$RESOLVED_CONF"
+    
+    echo "systemd-resolved 配置已更新"
+    echo "新的 DNS 服务器: $new_dns"
+    echo "备用 DNS 服务器: $new_fallback_dns"
+    
+    # 重启 systemd-resolved 服务
+    echo "重启 systemd-resolved 服务..."
+    systemctl restart systemd-resolved
+    
+    # 等待服务启动
+    sleep 2
+    
+    echo "systemd-resolved DNS 配置完成"
+    return 0
+}
+
+write_resolv_conf() {
+    if check_resolv_conf_symlink; then
+        echo "检测到 /etc/resolv.conf 是 systemd-resolved 软链接"
+        # 如果链接到 systemd-resolved，使用 systemd-resolved 配置
+        if systemctl is-active --quiet systemd-resolved; then
+            echo "systemd-resolved 服务运行中，将通过配置文件设置DNS"
+            local need_ipv4=false
+            local need_ipv6=false
+            
+            if ! $IPV4_OK; then
+                need_ipv4=true
+            fi
+            if ! $IPV6_OK; then
+                need_ipv6=true
+            fi
+            
+            configure_systemd_resolved $need_ipv4 $need_ipv6
+            return 0
+        else
+            echo "systemd-resolved 服务未运行，启动服务..."
+            systemctl start systemd-resolved
+            systemctl enable systemd-resolved
+            # 递归调用自身来配置
+            configure_systemd_resolved true true
+            return 0
+        fi
+    fi
+    
     echo "写入 /etc/resolv.conf ..."
     backup_resolv_conf
     {
-        echo "# 由 /usr/local/bin/check-dns.sh 生成，覆盖写入"
+        echo "# 由 $0 生成，覆盖写入 $(date)"
         for dns in "${DNS_SERVERS_IPV4[@]}"; do
             echo "nameserver $dns"
         done
@@ -131,6 +266,9 @@ write_resolv_conf() {
     echo "/etc/resolv.conf 更新完成"
 }
 
+# 主逻辑开始
+echo "开始检测DNS配置..."
+
 IPV4_OK=false
 IPV6_OK=false
 if check_ipv4_connectivity; then
@@ -140,11 +278,15 @@ fi
 if check_ipv6_connectivity; then
     IPV6_OK=true
 fi
+
 if $IPV4_OK && $IPV6_OK; then
     echo "IPv4和IPv6 DNS解析都正常，无需修改配置"
     exit 0
 fi
+
+echo "检测到DNS解析问题，开始修复..."
 set_ipv4_precedence_gai
+
 if check_nmcli; then
     echo "检测到 NetworkManager，使用 nmcli 设置 DNS 和路由优先"
     CONN_NAME=$(nmcli -t -f NAME,DEVICE connection show --active | head -n1 | cut -d: -f1)
@@ -208,15 +350,13 @@ elif check_resolvectl && systemctl is-active --quiet systemd-resolved; then
         echo "DNS 配置无需更新。"
     fi
 else
-    echo "未检测到 NetworkManager 或 systemd-resolved"
-    if check_resolv_conf_symlink; then
-        echo "由于 /etc/resolv.conf 是软链接，建议检查链接目标的DNS配置"
-        exit 0
-    fi
+    echo "未检测到 NetworkManager 或活跃的 systemd-resolved"
     if ! $IPV4_OK || ! $IPV6_OK; then
-        echo "准备直接修改 /etc/resolv.conf"
+        echo "准备配置 DNS 解析"
         write_resolv_conf
     else
-        echo "DNS 解析正常，无需修改 /etc/resolv.conf"
+        echo "DNS 解析正常，无需修改配置"
     fi
 fi
+
+echo "DNS 配置脚本执行完成"
