@@ -30,6 +30,15 @@ check_grep_extended_regex() {
     fi
 }
 
+# 检测 grep 是否支持 -P (Perl 正则) 选项
+check_grep_perl_regex() {
+    if echo "test123" | grep -oP '\d+' >/dev/null 2>&1; then
+        GREP_PERL_SUPPORT=true
+    else
+        GREP_PERL_SUPPORT=false
+    fi
+}
+
 # 安全的 sed 替换函数，自动选择正确的扩展正则选项
 safe_sed() {
     local pattern="$1"
@@ -54,6 +63,8 @@ init_env() {
             [[ -n $SYSTEM ]] && break
         fi
     done
+    check_grep_extended_regex
+    check_grep_perl_regex
     if [ ! -d "/usr/local/bin" ]; then
         mkdir -p /usr/local/bin
     fi
@@ -229,8 +240,15 @@ check_cdn_file() {
 statistics_of_run_times() {
     COUNT=$(curl -4 -ksm1 "https://hits.spiritlhl.net/incus?action=hit&title=Hits&title_bg=%23555555&count_bg=%2324dde1&edge_flat=false" 2>/dev/null ||
         curl -6 -ksm1 "https://hits.spiritlhl.net/incus?action=hit&title=Hits&title_bg=%23555555&count_bg=%2324dde1&edge_flat=false" 2>/dev/null)
-    TODAY=$(echo "$COUNT" | grep -oP '"daily":\s*[0-9]+' | sed 's/"daily":\s*\([0-9]*\)/\1/')
-    TOTAL=$(echo "$COUNT" | grep -oP '"total":\s*[0-9]+' | sed 's/"total":\s*\([0-9]*\)/\1/')
+    if [ "$GREP_PERL_SUPPORT" = true ]; then
+        # 如果支持 Perl 正则，使用 grep -oP（更精确）
+        TODAY=$(echo "$COUNT" | grep -oP '"daily":\s*[0-9]+' | sed 's/"daily":\s*\([0-9]*\)/\1/')
+        TOTAL=$(echo "$COUNT" | grep -oP '"total":\s*[0-9]+' | sed 's/"total":\s*\([0-9]*\)/\1/')
+    else
+        # 否则使用 BusyBox 兼容的方式
+        TODAY=$(echo "$COUNT" | grep -o '"daily":[[:space:]]*[0-9]*' | sed 's/"daily":[[:space:]]*\([0-9]*\)/\1/')
+        TOTAL=$(echo "$COUNT" | grep -o '"total":[[:space:]]*[0-9]*' | sed 's/"total":[[:space:]]*\([0-9]*\)/\1/')
+    fi
 }
 
 rebuild_cloud_init() {
