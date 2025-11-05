@@ -2,10 +2,47 @@
 # by https://github.com/oneclickvirt/incus
 # 2024.05.13
 
+# 检测 sed 是否支持 -E 选项
+check_sed_extended_regex() {
+    if echo "test" | sed -E 's/test/passed/' >/dev/null 2>&1; then
+        SED_EXTENDED="-E"
+    else
+        SED_EXTENDED="-r"
+    fi
+}
+
+# 检测 grep 是否支持 -E 选项
+check_grep_extended_regex() {
+    if echo "test" | grep -E 'test' >/dev/null 2>&1; then
+        GREP_EXTENDED="-E"
+    else
+        GREP_EXTENDED=""
+    fi
+}
+
+# 安全的 sed 替换函数
+safe_sed() {
+    local pattern="$1"
+    local file="$2"
+    sed $SED_EXTENDED -i "$pattern" "$file"
+}
+
+# 安全的 grep 函数
+safe_grep() {
+    if [ "$GREP_EXTENDED" = "-E" ]; then
+        grep -E "$@"
+    else
+        grep "$@"
+    fi
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "This script must be executed with root privileges."
   exit 1
 fi
+
+check_sed_extended_regex
+check_grep_extended_regex
 config_dir="/etc/ssh/sshd_config.d/"
 for file in "$config_dir"*; do
   if [ -f "$file" ] && [ -r "$file" ]; then
@@ -15,7 +52,7 @@ for file in "$config_dir"*; do
     fi
   fi
 done
-if [ "$(cat /etc/os-release | grep -E '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "alpine" ]; then
+if [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "alpine" ]; then
   apk update
   apk add --no-cache openssh-server
   apk add --no-cache sshpass
@@ -34,16 +71,19 @@ if [ "$(cat /etc/os-release | grep -E '^ID=' | cut -d '=' -f 2 | tr -d '"')" == 
   sed -i 's/#ListenAddress ::/ListenAddress ::/' /etc/ssh/sshd_config
   sed -i '/^#AddressFamily\|AddressFamily/c AddressFamily any' /etc/ssh/sshd_config
   sed -i "s/^#\?\(Port\).*/\1 22/" /etc/ssh/sshd_config
-  sed -i -E 's/^#?(Port).*/\1 22/' /etc/ssh/sshd_config
+  check_sed_extended_regex
+  safe_sed 's/^#?(Port).*/\1 22/' /etc/ssh/sshd_config
   sed -i '/^#UsePAM\|UsePAM/c #UsePAM no' /etc/ssh/sshd_config
-  sed -E -i 's/preserve_hostname:[[:space:]]*false/preserve_hostname: true/g' /etc/cloud/cloud.cfg
-  sed -E -i 's/disable_root:[[:space:]]*true/disable_root: false/g' /etc/cloud/cloud.cfg
-  sed -E -i 's/ssh_pwauth:[[:space:]]*false/ssh_pwauth:   true/g' /etc/cloud/cloud.cfg
+  if [ -f "/etc/cloud/cloud.cfg" ]; then
+    safe_sed 's/preserve_hostname:[[:space:]]*false/preserve_hostname: true/g' /etc/cloud/cloud.cfg
+    safe_sed 's/disable_root:[[:space:]]*true/disable_root: false/g' /etc/cloud/cloud.cfg
+    safe_sed 's/ssh_pwauth:[[:space:]]*false/ssh_pwauth:   true/g' /etc/cloud/cloud.cfg
+  fi
   /usr/sbin/sshd
   rc-update add sshd default
   echo root:"$1" | chpasswd root
   chattr +i /etc/ssh/sshd_config
-elif [ "$(cat /etc/os-release | grep -E '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "openwrt" ]; then
+elif [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "openwrt" ]; then
   opkg update
   opkg install openssh-server
   opkg install bash

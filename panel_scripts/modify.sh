@@ -30,6 +30,10 @@ if echo "$system" | grep -qiE "centos" || echo "$system" | grep -qiE "almalinux"
 elif echo "$system" | grep -qiE "alpine"; then
     incus exec "$name" -- apk update
     incus exec "$name" -- apk add --no-cache curl
+elif echo "$system" | grep -qiE "archlinux"; then
+    incus exec "$name" -- pacman -Sy
+    incus exec "$name" -- pacman -Sy --noconfirm --needed curl
+    incus exec "$name" -- pacman -Sy --noconfirm --needed dos2unix
 elif echo "$system" | grep -qiE "openwrt"; then
     incus exec "$name" -- opkg update
 else

@@ -17,6 +17,26 @@ else
     _green "Locale set to $utf8_locale"
 fi
 
+# 检测 grep 是否支持 -E 选项
+check_grep_extended_regex() {
+    if echo "test" | grep -E 'test' >/dev/null 2>&1; then
+        GREP_EXTENDED="-E"
+    else
+        GREP_EXTENDED=""
+    fi
+}
+
+# 安全的 grep 函数
+safe_grep() {
+    if [ "$GREP_EXTENDED" = "-E" ]; then
+        grep -E "$@"
+    else
+        grep "$@"
+    fi
+}
+
+check_grep_extended_regex
+
 # 必须以root身份运行脚本，且脚本必须在/root目录下
 if [[ $(id -u) != 0 ]]; then
     _yellow "You must run the script as root, please switch to root privileges before using this set of scripts."
@@ -53,8 +73,8 @@ if [ -n "$(command -v lsb_release)" ]; then
     distro=$(lsb_release -is)
     codename=$(lsb_release -cs)
 else
-    distro=$(cat /etc/*release | grep -E '^ID=' | awk -F= '{ print $2 }' | tr -d \")
-    codename=$(cat /etc/*release | grep -E '^VERSION_CODENAME=' | awk -F= '{ print $2 }' | tr -d \")
+    distro=$(cat /etc/*release | safe_grep '^ID=' | awk -F= '{ print $2 }' | tr -d \")
+    codename=$(cat /etc/*release | safe_grep '^VERSION_CODENAME=' | awk -F= '{ print $2 }' | tr -d \")
 fi
 
 if [[ ! $distro == @(Ubuntu|ubuntu|Debian|debian) ]]; then

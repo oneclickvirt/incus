@@ -12,6 +12,40 @@ TRIED_STORAGE_FILE="/usr/local/bin/incus_tried_storage"
 INSTALLED_STORAGE_FILE="/usr/local/bin/incus_installed_storage"
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 
+# 检测 sed 是否支持 -E 选项
+check_sed_extended_regex() {
+    if echo "test" | sed -E 's/test/passed/' >/dev/null 2>&1; then
+        SED_EXTENDED="-E"
+    else
+        SED_EXTENDED="-r"
+    fi
+}
+
+# 检测 grep 是否支持 -E 选项
+check_grep_extended_regex() {
+    if echo "test" | grep -E 'test' >/dev/null 2>&1; then
+        GREP_EXTENDED="-E"
+    else
+        GREP_EXTENDED="-e"
+    fi
+}
+
+# 安全的 sed 替换函数，自动选择正确的扩展正则选项
+safe_sed() {
+    local pattern="$1"
+    local file="$2"
+    sed $SED_EXTENDED -i "$pattern" "$file"
+}
+
+# 安全的 grep 函数，自动选择正确的扩展正则选项
+safe_grep() {
+    if [ "$GREP_EXTENDED" = "-E" ]; then
+        grep -E "$@"
+    else
+        grep "$@"
+    fi
+}
+
 init_env() {
     [[ -n $SYS ]] || exit 1
     for ((int = 0; int < ${#REGEX[@]}; int++)); do
@@ -101,6 +135,14 @@ detect_os() {
             PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
             PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
             ;;
+        alpine)
+            OS="alpine"
+            VERSION="$VERSION_ID"
+            PACKAGETYPE="apk"
+            PACKAGETYPE_INSTALL="apk add --no-cache"
+            PACKAGETYPE_UPDATE="apk update"
+            PACKAGETYPE_REMOVE="apk del"
+            ;;
         esac
     fi
     if [ -z "${PACKAGETYPE:-}" ]; then
@@ -124,6 +166,11 @@ detect_os() {
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
             PACKAGETYPE_UPDATE="pacman -Sy"
             PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+        elif command -v apk >/dev/null 2>&1; then
+            PACKAGETYPE="apk"
+            PACKAGETYPE_INSTALL="apk add --no-cache"
+            PACKAGETYPE_UPDATE="apk update"
+            PACKAGETYPE_REMOVE="apk del"
         fi
     fi
 }
@@ -187,18 +234,19 @@ statistics_of_run_times() {
 }
 
 rebuild_cloud_init() {
+    check_sed_extended_regex
     if [ -f "/etc/cloud/cloud.cfg" ]; then
         chattr -i /etc/cloud/cloud.cfg
         if grep -q "preserve_hostname: true" "/etc/cloud/cloud.cfg"; then
             :
         else
-            sed -E -i 's/preserve_hostname:[[:space:]]*false/preserve_hostname: true/g' "/etc/cloud/cloud.cfg"
+            safe_sed 's/preserve_hostname:[[:space:]]*false/preserve_hostname: true/g' "/etc/cloud/cloud.cfg"
             echo "change preserve_hostname to true"
         fi
         if grep -q "disable_root: false" "/etc/cloud/cloud.cfg"; then
             :
         else
-            sed -E -i 's/disable_root:[[:space:]]*true/disable_root: false/g' "/etc/cloud/cloud.cfg"
+            safe_sed 's/disable_root:[[:space:]]*true/disable_root: false/g' "/etc/cloud/cloud.cfg"
             echo "change disable_root to false"
         fi
         chattr -i /etc/cloud/cloud.cfg
@@ -704,6 +752,8 @@ setup_iptables() {
 }
 
 configure_uid_gid() {
+  check_sed_extended_regex
+  check_grep_extended_regex
   local UID_RANGE="${1:-100000:65536}"
   local FILES=(/etc/subuid /etc/subgid)
   local USERS=(root)
@@ -714,7 +764,7 @@ configure_uid_gid() {
   for FILE in "${FILES[@]}"; do
     sudo touch "$FILE"
     for USER_NAME in "${USERS[@]}"; do
-      sudo sed -i -E "/^${USER_NAME}:[0-9]+:[0-9]+/d" "$FILE"
+      sudo sed -i $SED_EXTENDED "/^${USER_NAME}:[0-9]+:[0-9]+/d" "$FILE"
     done
     for USER_NAME in "${USERS[@]}"; do
       if getent passwd "$USER_NAME" > /dev/null; then
@@ -725,7 +775,7 @@ configure_uid_gid() {
       fi
     done
   done
-  grep -E "^($(IFS="|"; echo "${USERS[*]}"))/" /etc/subuid /etc/subgid || true
+  safe_grep "^($(IFS="|"; echo "${USERS[*]}"))/" /etc/subuid /etc/subgid || true
 }
 
 copy_scripts_to_system() {

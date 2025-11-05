@@ -26,6 +26,10 @@ if [ -x "$(command -v apt-get)" ]; then
   sudo apt-get update
 elif [ -x "$(command -v yum)" ]; then
   sudo yum update
+elif [ -x "$(command -v apk)" ]; then
+  sudo apk update
+elif [ -x "$(command -v pacman)" ]; then
+  sudo pacman -Sy
 fi
 
 divert_install_script "zmap"

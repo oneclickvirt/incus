@@ -8,8 +8,37 @@ _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 
+# 检测 grep 是否支持 -E 选项
+check_grep_extended_regex() {
+    if echo "test" | grep -E 'test' >/dev/null 2>&1; then
+        GREP_EXTENDED="-E"
+    else
+        GREP_EXTENDED=""
+    fi
+}
+
+# 检测 grep 是否支持 -P (Perl 正则) 选项
+check_grep_perl_regex() {
+    if echo "test123" | grep -oP '\d+' >/dev/null 2>&1; then
+        GREP_PERL_SUPPORT=true
+    else
+        GREP_PERL_SUPPORT=false
+    fi
+}
+
+# 安全的 grep 函数
+safe_grep() {
+    if [ "$GREP_EXTENDED" = "-E" ]; then
+        grep -E "$@"
+    else
+        grep "$@"
+    fi
+}
+
 # 设置环境变量
 setup_environment() {
+    check_grep_extended_regex
+    check_grep_perl_regex
     if [ ! -d "/usr/local/bin" ]; then
         mkdir -p /usr/local/bin
     fi
@@ -84,6 +113,14 @@ detect_os() {
             PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
             PACKAGETYPE_ONLY_REMOVE="pacman -Rdd --noconfirm"
             ;;
+        alpine)
+            OS="alpine"
+            VERSION="$VERSION_ID"
+            PACKAGETYPE="apk"
+            PACKAGETYPE_INSTALL="apk add --no-cache"
+            PACKAGETYPE_UPDATE="apk update"
+            PACKAGETYPE_REMOVE="apk del"
+            ;;
         esac
     fi
     if [ -z "${PACKAGETYPE:-}" ]; then
@@ -108,8 +145,86 @@ detect_os() {
             PACKAGETYPE_INSTALL="pacman -S --noconfirm --needed"
             PACKAGETYPE_UPDATE="pacman -Sy"
             PACKAGETYPE_REMOVE="pacman -Rsc --noconfirm"
+        elif command -v apk >/dev/null 2>&1; then
+            PACKAGETYPE="apk"
+            PACKAGETYPE_INSTALL="apk add --no-cache"
+            PACKAGETYPE_UPDATE="apk update"
+            PACKAGETYPE_REMOVE="apk del"
         fi
     fi
+}
+
+# 安装 rdisc6 工具用于从路由器获取 IPv6 配置
+install_rdisc6() {
+    if ! command -v rdisc6 >/dev/null 2>&1; then
+        _blue "Installing ndisc6 package for IPv6 router discovery..."
+        _green "正在安装 ndisc6 软件包用于 IPv6 路由器发现..."
+        install_package ndisc6
+    fi
+}
+
+# 从路由器通告中获取真实的 IPv6 前缀长度
+get_real_ipv6_prefixlen_from_router() {
+    local interface="$1"
+    local current_prefixlen="$2"
+    
+    if [ ! -f /usr/local/bin/incus_ipv6_real_prefixlen ]; then
+        if command -v rdisc6 >/dev/null 2>&1; then
+            _blue "Attempting to get real IPv6 prefix from router advertisement..."
+            _green "尝试从路由器通告中获取真实的 IPv6 前缀..."
+            _blue "Using network interface: ${interface}"
+            _green "正在使用网络接口: ${interface}"
+            
+            local rdisc6_output
+            rdisc6_output=$(timeout 10 rdisc6 "${interface}" 2>/dev/null)
+            
+            if [ -n "$rdisc6_output" ]; then
+                # 从路由器通告中提取前缀长度
+                local real_prefixlen
+                if [ "$GREP_PERL_SUPPORT" = true ]; then
+                    # 如果支持 Perl 正则，使用 grep -oP（更精确）
+                    real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | grep -oP '[:：]\s*[0-9a-fA-F:]+/\K\d+' | head -n 1)
+                else
+                    # 否则使用兼容的 sed 方式，避免 Perl 正则表达式依赖
+                    real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | sed -n 's/.*[：:][[:space:]]*\([0-9a-fA-F:]*\)\/\([0-9]\+\).*/\2/p' | head -n 1)
+                fi
+                
+                if [ -n "$real_prefixlen" ] && [ "$real_prefixlen" -gt 0 ] && [ "$real_prefixlen" -le 128 ]; then
+                    _green "Found real IPv6 prefix length from router advertisement: /$real_prefixlen"
+                    _green "从路由器通告中发现真实的 IPv6 前缀长度: /$real_prefixlen"
+                    
+                    # 比较当前前缀长度和路由器通告的前缀长度
+                    if [ -n "$current_prefixlen" ] && [ "$current_prefixlen" -lt "$real_prefixlen" ]; then
+                        _yellow "Warning: Current interface prefix /$current_prefixlen is smaller than router advertised /$real_prefixlen"
+                        _yellow "警告: 当前接口前缀 /$current_prefixlen 小于路由器通告的 /$real_prefixlen"
+                        _blue "Using the larger prefix /$real_prefixlen from router advertisement"
+                        _green "将使用路由器通告的更大前缀 /$real_prefixlen"
+                        echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
+                        echo "$real_prefixlen"
+                        return 0
+                    elif [ -z "$current_prefixlen" ]; then
+                        echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
+                        echo "$real_prefixlen"
+                        return 0
+                    fi
+                else
+                    _yellow "Could not parse IPv6 prefix length from router advertisement"
+                    _yellow "无法从路由器通告中解析 IPv6 前缀长度"
+                fi
+            else
+                _yellow "Could not get router advertisement response on interface ${interface} (timeout or no response)"
+                _yellow "无法在接口 ${interface} 获取路由器通告响应(超时或无响应)"
+            fi
+        fi
+    else
+        # 如果已经有缓存的真实前缀长度，直接返回
+        cat /usr/local/bin/incus_ipv6_real_prefixlen
+        return 0
+    fi
+    
+    # 如果无法从路由器获取，返回当前前缀长度
+    echo "$current_prefixlen"
+    return 1
 }
 
 install_package() {
@@ -347,7 +462,7 @@ get_container_ipv6() {
 
 # 获取宿主机IPv6子网前缀
 get_host_ipv6_prefix() {
-    local prefix=$(ip -6 addr show | grep -E 'inet6.*global' | awk '{print $2}' | awk -F'/' '{print $1}' | head -n 1 | cut -d ':' -f1-5):
+    local prefix=$(ip -6 addr show | safe_grep 'inet6.*global' | awk '{print $2}' | awk -F'/' '{print $1}' | head -n 1 | cut -d ':' -f1-5):
     if [ -z "$prefix" ]; then
         _red "No IPV6 subnet, no automatic mapping"
         _red "无 IPV6 子网，不进行自动映射"
@@ -426,18 +541,32 @@ setup_network_device_ipv6() {
     else
         install_package sipcalc
     fi
+    # 安装 rdisc6 工具用于从路由器获取真实的 IPv6 前缀长度
+    install_rdisc6
     if [ ! -f /usr/local/bin/incus_check_ipv6 ] || [ ! -s /usr/local/bin/incus_check_ipv6 ] || [ "$(sed -e '/^[[:space:]]*$/d' /usr/local/bin/incus_check_ipv6)" = "" ]; then
         check_ipv6
     fi
     IPV6=$(cat /usr/local/bin/incus_check_ipv6)
     if ip -f inet6 addr | grep -q "he-ipv6"; then
         ipv6_network_name="he-ipv6"
-        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep -E "${IPV6}/24|${IPV6}/48|${IPV6}/64|${IPV6}/80|${IPV6}/96|${IPV6}/112" | grep global | awk '{print $2}' 2>/dev/null)
+        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | safe_grep "${IPV6}/24|${IPV6}/48|${IPV6}/64|${IPV6}/80|${IPV6}/96|${IPV6}/112" | grep global | awk '{print $2}' 2>/dev/null)
     else
         ipv6_network_name=$(ls /sys/class/net/ | grep -v "$(ls /sys/devices/virtual/net/)")
         ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
     fi
     _yellow "Local IPV6 address: $ip_network_gam"
+    # 尝试从路由器获取真实的 IPv6 前缀长度
+    if [ -n "$ip_network_gam" ] && [ -n "$ipv6_network_name" ]; then
+        current_prefixlen=$(echo "$ip_network_gam" | cut -d'/' -f2)
+        real_prefixlen=$(get_real_ipv6_prefixlen_from_router "$ipv6_network_name" "$current_prefixlen")
+        # 如果获取到真实前缀长度，并且与当前前缀长度不同，则使用真实前缀长度
+        if [ -n "$real_prefixlen" ] && [ "$real_prefixlen" != "$current_prefixlen" ]; then
+            ipv6_addr_only=$(echo "$ip_network_gam" | cut -d'/' -f1)
+            ip_network_gam="${ipv6_addr_only}/${real_prefixlen}"
+            _green "Updated IPv6 address with real prefix from router: $ip_network_gam"
+            _green "使用从路由器获取的真实前缀更新 IPv6 地址: $ip_network_gam"
+        fi
+    fi
     if [ -n "$ip_network_gam" ]; then
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1"
         update_sysctl "net.ipv6.conf.all.forwarding=1"
@@ -581,6 +710,15 @@ main() {
     ipv6_address=$(ip addr show | awk '/inet6.*scope global/ { print $2 }' | head -n 1)
     if [[ $ipv6_address == */* ]]; then
         ipv6_length=$(echo "$ipv6_address" | awk -F '/' '{ print $2 }')
+        # 尝试从路由器获取真实的 IPv6 前缀长度
+        real_ipv6_length=$(get_real_ipv6_prefixlen_from_router "$interface" "$ipv6_length")
+        if [ -n "$real_ipv6_length" ] && [ "$real_ipv6_length" != "$ipv6_length" ]; then
+            _yellow "Current interface IPv6 prefix: /$ipv6_length, Real prefix from router: /$real_ipv6_length"
+            _yellow "当前接口 IPv6 前缀: /$ipv6_length, 从路由器获取的真实前缀: /$real_ipv6_length"
+            ipv6_length="$real_ipv6_length"
+            ipv6_addr_only=$(echo "$ipv6_address" | cut -d'/' -f1)
+            ipv6_address="${ipv6_addr_only}/${ipv6_length}"
+        fi
         _green "subnet size: $ipv6_length"
         _green "子网大小: $ipv6_length"
     else

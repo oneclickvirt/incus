@@ -40,9 +40,19 @@ install_package() {
         _green "$package_name has been installed"
         _green "$package_name 已经安装"
     else
-        apt-get install -y $package_name
-        if [ $? -ne 0 ]; then
-            apt-get install -y $package_name --fix-missing
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y $package_name
+            if [ $? -ne 0 ]; then
+                apt-get install -y $package_name --fix-missing
+            fi
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y $package_name
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y $package_name
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -S --noconfirm --needed $package_name
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache $package_name
         fi
         _green "$package_name has attempted to install"
         _green "$package_name 已尝试安装"

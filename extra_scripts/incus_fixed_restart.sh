@@ -22,6 +22,8 @@ get_package_manager() {
         echo "dnf"
     elif command -v pacman &> /dev/null; then
         echo "pacman"
+    elif command -v apk &> /dev/null; then
+        echo "apk"
     elif command -v zypper &> /dev/null; then
         echo "zypper"
     else
@@ -57,6 +59,9 @@ install_cpulimit() {
             ;;
         pacman)
             sudo pacman -S --noconfirm cpulimit >> "$LOG_FILE" 2>&1
+            ;;
+        apk)
+            sudo apk add --no-cache cpulimit >> "$LOG_FILE" 2>&1
             ;;
         zypper)
             sudo zypper install -y cpulimit >> "$LOG_FILE" 2>&1
