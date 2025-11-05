@@ -2,6 +2,64 @@
 # by https://github.com/oneclickvirt/incus
 # 2023.09.05
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # 环境安装
 # 安装vnstat
 apt update
@@ -47,8 +105,8 @@ tar zxvf vnstat-2.11.tar.gz
 cd vnstat-2.11
 ./configure --prefix=/usr --sysconfdir=/etc && make && make install
 cp -v examples/systemd/vnstat.service /etc/systemd/system/
-systemctl enable vnstat
-systemctl start vnstat
+service_manager enable vnstat
+service_manager start vnstat
 pgrep -c vnstatd
 vnstat -v
 vnstatd -v

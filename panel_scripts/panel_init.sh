@@ -33,6 +33,226 @@ _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
+
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        disable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl disable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update del "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" off 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        stop)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl stop "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" stop 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" stop 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl restart "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        daemon-reload)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload 2>/dev/null
+                executed=true
+                success=true
+            fi
+            if ! $executed; then
+                success=true
+            fi
+            ;;
+        is-active)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            if command -v service >/dev/null 2>&1; then
+                if service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
+
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+service_manager() {
+    local action=$1
+    local service_name=$2
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl enable "$service_name" 2>/dev/null || true
+            elif command -v rc-update >/dev/null 2>&1; then
+                rc-update add "$service_name" default 2>/dev/null || true
+            elif command -v chkconfig >/dev/null 2>&1; then
+                chkconfig "$service_name" on 2>/dev/null || true
+            fi
+            ;;
+        disable)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl disable "$service_name" 2>/dev/null || true
+            elif command -v rc-update >/dev/null 2>&1; then
+                rc-update del "$service_name" default 2>/dev/null || true
+            elif command -v chkconfig >/dev/null 2>&1; then
+                chkconfig "$service_name" off 2>/dev/null || true
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl start "$service_name" 2>/dev/null || true
+            elif command -v rc-service >/dev/null 2>&1; then
+                rc-service "$service_name" start 2>/dev/null || true
+            elif command -v service >/dev/null 2>&1; then
+                service "$service_name" start 2>/dev/null || true
+            fi
+            ;;
+        stop)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl stop "$service_name" 2>/dev/null || true
+            elif command -v rc-service >/dev/null 2>&1; then
+                rc-service "$service_name" stop 2>/dev/null || true
+            elif command -v service >/dev/null 2>&1; then
+                service "$service_name" stop 2>/dev/null || true
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl restart "$service_name" 2>/dev/null || true
+            elif command -v rc-service >/dev/null 2>&1; then
+                rc-service "$service_name" restart 2>/dev/null || true
+            elif command -v service >/dev/null 2>&1; then
+                service "$service_name" restart 2>/dev/null || true
+            fi
+            ;;
+        daemon-reload)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload 2>/dev/null || true
+            fi
+            # OpenRC不需要daemon-reload
+            ;;
+        is-active)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl is-active --quiet "$service_name" 2>/dev/null
+            elif command -v rc-service >/dev/null 2>&1; then
+                rc-service "$service_name" status >/dev/null 2>&1
+            elif command -v service >/dev/null 2>&1; then
+                service "$service_name" status >/dev/null 2>&1
+            else
+                return 1
+            fi
+            ;;
+    esac
+}
+
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
 export DEBIAN_FRONTEND=noninteractive
@@ -180,8 +400,8 @@ tar zxvf vnstat-2.11.tar.gz
 cd vnstat-2.11
 ./configure --prefix=/usr --sysconfdir=/etc && make && make install
 cp -v examples/systemd/vnstat.service /etc/systemd/system/
-systemctl enable vnstat
-systemctl start vnstat
+service_manager enable vnstat
+service_manager start vnstat
 pgrep -c vnstatd
 vnstat -v
 vnstatd -v

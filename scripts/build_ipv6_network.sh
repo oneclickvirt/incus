@@ -8,6 +8,94 @@ _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl restart "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        daemon-reload)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload 2>/dev/null
+                executed=true
+                success=true
+            fi
+            if ! $executed; then
+                success=true
+            fi
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # 检测 grep 是否支持 -E 选项
 check_grep_extended_regex() {
     if echo "test" | grep -E 'test' >/dev/null 2>&1; then
@@ -643,7 +731,8 @@ setup_iptables_ipv6() {
     fi
     ip addr add "$IPV6"/"$ipv6_length" dev "$interface"
     if [ "$use_firewalld" = true ]; then
-        systemctl enable --now firewalld
+        service_manager enable
+        service_manager start firewalld
         sleep 3
         firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d $IPV6 -j DNAT --to-destination $container_ipv6
         firewall-cmd --reload
@@ -659,8 +748,9 @@ setup_iptables_ipv6() {
     if [ ! -f /etc/systemd/system/add-ipv6.service ]; then
         wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
         chmod +x /etc/systemd/system/add-ipv6.service
-        systemctl daemon-reload
-        systemctl enable --now add-ipv6.service
+        service_manager daemon-reload
+        service_manager enable
+        service_manager start add-ipv6.service
     else
         echo "Service already exists. Skipping installation."
     fi
@@ -672,7 +762,7 @@ setup_iptables_ipv6() {
         netfilter-persistent reload
         service netfilter-persistent restart
     elif [ "$use_firewalld" = true ]; then
-        systemctl restart firewalld
+        service_manager restart firewalld
     else
         echo "Unsupported system: cannot persist ip6tables rules"
         exit 1

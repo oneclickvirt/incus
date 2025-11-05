@@ -2,6 +2,126 @@
 # by https://github.com/oneclickvirt/incus
 # 2025.06.26
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        daemon-reload)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl daemon-reload 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                # OpenRC doesn't need daemon-reload
+                executed=true
+                success=true
+            fi
+            ;;
+        daemon-reexec)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl daemon-reexec 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                # OpenRC doesn't need daemon-reexec
+                executed=true
+                success=true
+            fi
+            ;;
+        is-enabled)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update show | grep -q "^\s*$service_name\s*|"; then
+                    return 0
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" 2>/dev/null | grep -q "on"; then
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+        is-active)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            if command -v service >/dev/null 2>&1; then
+                if service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 check_cdn() {
     local o_url=$1
     local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
@@ -51,16 +171,16 @@ ensure_coexistence_setup() {
         }
     fi
     echo "Reloading systemd daemon..."
-    systemctl daemon-reexec
-    systemctl daemon-reload
+    service_manager daemon-reexec
+    service_manager daemon-reload
     for unit in coexistence.service coexistence.timer; do
-        if ! systemctl is-enabled --quiet "$unit"; then
+        if ! service_manager is-enabled "$unit"; then
             echo "Enabling $unit..."
-            systemctl enable "$unit"
+            service_manager enable "$unit"
         fi
-        if ! systemctl is-active --quiet "$unit"; then
+        if ! service_manager is-active "$unit"; then
             echo "Starting $unit..."
-            systemctl start "$unit"
+            service_manager start "$unit"
         fi
     done
     echo "Done!"

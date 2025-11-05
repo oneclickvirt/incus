@@ -3,6 +3,102 @@
 # 2025.09.18
 set -e
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl restart "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        is-active)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            if command -v service >/dev/null 2>&1; then
+                if service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 DNS_SERVERS_IPV4=(
     "1.1.1.1"
     "8.8.8.8"
@@ -215,7 +311,7 @@ configure_systemd_resolved() {
     
     # 重启 systemd-resolved 服务
     echo "重启 systemd-resolved 服务..."
-    systemctl restart systemd-resolved
+    service_manager restart systemd-resolved
     
     # 等待服务启动
     sleep 2
@@ -228,7 +324,7 @@ write_resolv_conf() {
     if check_resolv_conf_symlink; then
         echo "检测到 /etc/resolv.conf 是 systemd-resolved 软链接"
         # 如果链接到 systemd-resolved，使用 systemd-resolved 配置
-        if systemctl is-active --quiet systemd-resolved; then
+        if service_manager is-active systemd-resolved; then
             echo "systemd-resolved 服务运行中，将通过配置文件设置DNS"
             local need_ipv4=false
             local need_ipv6=false
@@ -244,8 +340,8 @@ write_resolv_conf() {
             return 0
         else
             echo "systemd-resolved 服务未运行，启动服务..."
-            systemctl start systemd-resolved
-            systemctl enable systemd-resolved
+            service_manager start systemd-resolved
+            service_manager enable systemd-resolved
             # 递归调用自身来配置
             configure_systemd_resolved true true
             return 0
@@ -322,7 +418,7 @@ if check_nmcli; then
     else
         echo "DNS 配置无需更新。"
     fi
-elif check_resolvectl && systemctl is-active --quiet systemd-resolved; then
+elif check_resolvectl && service_manager is-active systemd-resolved; then
     echo "检测到 systemd-resolved，使用 resolvectl 设置 DNS"
     IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [ -z "$IFACE" ]; then

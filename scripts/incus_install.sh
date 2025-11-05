@@ -86,6 +86,161 @@ _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            # 尝试 systemctl
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            # 尝试 rc-update (OpenRC)
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            # 尝试 chkconfig (老版本系统)
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        disable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl disable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update del "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" off 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            # 尝试 systemctl
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            # 尝试 rc-service
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            # 如果上面都没成功，尝试传统 service 命令
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        stop)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl stop "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" stop 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" stop 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl restart "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        daemon-reload)
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload 2>/dev/null
+                executed=true
+                success=true
+            fi
+            # OpenRC不需要daemon-reload，直接返回成功
+            if ! $executed; then
+                success=true
+            fi
+            ;;
+        is-active)
+            # 按优先级检查服务状态
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            if command -v service >/dev/null 2>&1; then
+                if service "$service_name" status >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+    
+    # 对于非查询操作，如果执行过返回成功，否则返回失败
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -335,13 +490,15 @@ install_incus() {
                     apt install -y incus || install_via_zabbly
                 fi
             fi
-            systemctl enable incus --now
+            service_manager enable incus
+            service_manager start incus
         elif [ -f /etc/arch-release ]; then
             echo "检测到 Arch Linux | Detected Arch Linux"
             echo "移除 iptables（如果存在）并安装 iptables-nft 与 incus | Removing iptables (if exists) and installing iptables-nft and incus"
             pacman -R --noconfirm iptables
             pacman -Syu --noconfirm iptables-nft incus
-            systemctl enable incus --now
+            service_manager enable incus
+            service_manager start incus
         elif [ -f /etc/gentoo-release ]; then
             echo "检测到 Gentoo | Detected Gentoo"
             echo "使用 emerge 安装 incus | Installing incus using emerge"
@@ -354,7 +511,8 @@ install_incus() {
             dnf config-manager --set-enabled crb
             echo "安装 incus 与 incus-tools | Installing incus and incus-tools"
             dnf install -y incus incus-tools
-            systemctl enable incus --now
+            service_manager enable incus
+            service_manager start incus
         elif [ -f /etc/void-release ]; then
             echo "检测到 Void Linux | Detected Void Linux"
             echo "使用 xbps 安装 incus 与 incus-client | Installing incus and incus-client using xbps"
@@ -369,19 +527,23 @@ install_incus() {
             if command -v apt >/dev/null 2>&1; then
                 apt update
                 apt install -y incus
-                systemctl enable incus --now
+                service_manager enable incus
+            service_manager start incus
             elif command -v dnf >/dev/null 2>&1; then
                 dnf install -y incus
-                systemctl enable incus --now
+                service_manager enable incus
+            service_manager start incus
             elif command -v pacman >/dev/null 2>&1; then
                 pacman -Syu --noconfirm incus
-                systemctl enable incus --now
+                service_manager enable incus
+            service_manager start incus
             else
                 $PACKAGETYPE_INSTALL incus
                 if [[ $? -ne 0 ]]; then
                     echo "无法识别包管理器，请手动安装 incus | Unable to recognize package manager, please install incus manually."
                 else
-                    systemctl enable incus --now
+                    service_manager enable incus
+            service_manager start incus
                 fi
             fi
         fi
@@ -394,13 +556,13 @@ setup_firewall() {
     if command -v apt >/dev/null 2>&1; then
         install_package ufw
         ufw disable || true
-        systemctl stop firewalld || true
-        systemctl disable firewalld || true
+        service_manager stop firewalld 2>/dev/null || true
+        service_manager disable firewalld 2>/dev/null || true
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
         install_package epel-release
         install_package firewalld
-        systemctl enable firewalld
-        systemctl start firewalld
+        service_manager enable firewalld
+        service_manager start firewalld
     fi
     install_package lsb_release
     install_package uidmap
@@ -727,7 +889,7 @@ optimize_system() {
     fi
     if [ -f "/etc/gai.conf" ]; then
         sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf
-        systemctl restart networking 2>/dev/null || true
+        service_manager restart networking 2>/dev/null || true
     fi
 }
 
@@ -741,9 +903,9 @@ install_dns_checker() {
     if [ ! -f /etc/systemd/system/check-dns.service ]; then
         wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.service -O /etc/systemd/system/check-dns.service
         chmod +x /etc/systemd/system/check-dns.service
-        systemctl daemon-reload
-        systemctl enable check-dns.service
-        systemctl start check-dns.service
+        service_manager daemon-reload
+        service_manager enable check-dns.service
+        service_manager start check-dns.service
     else
         echo "Service already exists. Skipping installation."
     fi
@@ -818,10 +980,10 @@ main() {
     configure_uid_gid
     download_preconfigured_files
     copy_scripts_to_system
-    systemctl enable incus
-    systemctl restart incus
+    service_manager enable incus
+    service_manager restart incus
     sleep 6
-    systemctl stop incus
+    service_manager stop incus
     sleep 6
     install_dns_checker
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"

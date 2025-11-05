@@ -2,6 +2,84 @@
 # by https://github.com/oneclickvirt/incus
 # 2025.07.11
 
+# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
+# 在混合环境中会尝试多个命令以确保操作成功
+service_manager() {
+    local action=$1
+    local service_name=$2
+    local executed=false
+    local success=false
+    
+    case "$action" in
+        enable)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl enable "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update add "$service_name" default 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v chkconfig >/dev/null 2>&1; then
+                if chkconfig "$service_name" on 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        start)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl start "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" start 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+        restart)
+            if command -v systemctl >/dev/null 2>&1; then
+                if systemctl restart "$service_name" 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            if ! $success && command -v service >/dev/null 2>&1; then
+                if service "$service_name" restart 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
+            fi
+            ;;
+    esac
+    
+    if $executed; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 if [ -f "/etc/resolv.conf" ]; then
     cp /etc/resolv.conf /etc/resolv.conf.bak
     echo "nameserver 8.8.8.8" | tee -a /etc/resolv.conf >/dev/null
@@ -86,14 +164,14 @@ remove_duplicate_lines() {
 
 checkupdate
 install_required_modules
-sudo systemctl enable sshd
-sudo systemctl enable ssh
+service_manager enable sshd
+service_manager enable ssh
 ssh-keygen -A
 sleep 3
 sudo service ssh start
 sudo service sshd start
-sudo systemctl start sshd
-sudo systemctl start ssh
+service_manager start sshd
+service_manager start ssh
 if [ -f "/etc/motd" ]; then
     echo '' >/etc/motd
     echo 'Related repo https://github.com/oneclickvirt/incus' >>/etc/motd
@@ -146,6 +224,6 @@ for file in "$config_dir"*; do
 done
 sudo service ssh restart
 sudo service sshd restart
-sudo systemctl restart sshd
-sudo systemctl restart ssh
+service_manager restart sshd
+service_manager restart ssh
 rm -rf "$0"
