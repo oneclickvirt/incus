@@ -876,7 +876,14 @@ optimize_system() {
     if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
         echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
     fi
-    sysctl --system >/dev/null
+    # Check if sysctl supports --system option (not available in BusyBox)
+    if sysctl --help 2>&1 | grep -q -- '--system'; then
+        sysctl --system >/dev/null 2>&1
+    else
+        # BusyBox or minimal sysctl: apply settings manually
+        sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+        sysctl -p "$SYSCTL_D_CONF" >/dev/null 2>&1 || true
+    fi
     if [ -f "/etc/security/limits.conf" ]; then
         grep -q "*          hard    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
@@ -927,7 +934,15 @@ setup_iptables() {
         firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
         firewall-cmd --reload
     else
-        echo "Unsupported system: no iptables-persistent or firewall-cmd found"
+        # Fallback for systems without iptables-persistent or firewall-cmd (e.g., Alpine Linux)
+        echo "Note: Using basic iptables rules (no persistence tool found)"
+        if command -v iptables >/dev/null 2>&1; then
+            iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
+            # Try to save rules if rc-update is available (Alpine/OpenRC)
+            if command -v rc-update >/dev/null 2>&1; then
+                /etc/init.d/iptables save 2>/dev/null || true
+            fi
+        fi
     fi
 }
 
@@ -948,7 +963,10 @@ configure_uid_gid() {
     done
     for USER_NAME in "${USERS[@]}"; do
       if getent passwd "$USER_NAME" > /dev/null; then
-        echo "Setting subuid/subgid for $USER_NAME: $UID_RANGE"
+        # Only print once for both files to avoid duplicate messages
+        if [ "$FILE" = "/etc/subuid" ]; then
+          echo "Setting subuid/subgid for $USER_NAME: $UID_RANGE"
+        fi
         echo "${USER_NAME}:${UID_RANGE}" | sudo tee -a "$FILE" >/dev/null
       else
         echo "Warning: user '$USER_NAME' does not exist; skipping $FILE." >&2

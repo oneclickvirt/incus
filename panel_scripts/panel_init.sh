@@ -364,7 +364,14 @@ mkdir -p /etc/sysctl.d
 if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
     echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
 fi
-${sysctl_path} --system >/dev/null
+# Check if sysctl supports --system option (not available in BusyBox)
+if ${sysctl_path} --help 2>&1 | grep -q -- '--system'; then
+    ${sysctl_path} --system >/dev/null 2>&1
+else
+    # BusyBox or minimal sysctl: apply settings manually
+    ${sysctl_path} -p /etc/sysctl.conf >/dev/null 2>&1 || true
+    ${sysctl_path} -p "$SYSCTL_D_CONF" >/dev/null 2>&1 || true
+fi
 incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
 incus network set incusbr0 dns.mode managed
 # managed none dynamic
