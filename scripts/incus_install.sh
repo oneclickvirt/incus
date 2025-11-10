@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.08.26
+# 2025.11.10
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -93,24 +93,20 @@ service_manager() {
     local service_name=$2
     local executed=false
     local success=false
-    
     case "$action" in
         enable)
-            # 尝试 systemctl
             if command -v systemctl >/dev/null 2>&1; then
                 if systemctl enable "$service_name" 2>/dev/null; then
                     executed=true
                     success=true
                 fi
             fi
-            # 尝试 rc-update (OpenRC)
             if command -v rc-update >/dev/null 2>&1; then
                 if rc-update add "$service_name" default 2>/dev/null; then
                     executed=true
                     success=true
                 fi
             fi
-            # 尝试 chkconfig (老版本系统)
             if command -v chkconfig >/dev/null 2>&1; then
                 if chkconfig "$service_name" on 2>/dev/null; then
                     executed=true
@@ -139,21 +135,18 @@ service_manager() {
             fi
             ;;
         start)
-            # 尝试 systemctl
             if command -v systemctl >/dev/null 2>&1; then
                 if systemctl start "$service_name" 2>/dev/null; then
                     executed=true
                     success=true
                 fi
             fi
-            # 尝试 rc-service
             if command -v rc-service >/dev/null 2>&1; then
                 if rc-service "$service_name" start 2>/dev/null; then
                     executed=true
                     success=true
                 fi
             fi
-            # 如果上面都没成功，尝试传统 service 命令
             if ! $success && command -v service >/dev/null 2>&1; then
                 if service "$service_name" start 2>/dev/null; then
                     executed=true
@@ -207,13 +200,11 @@ service_manager() {
                 executed=true
                 success=true
             fi
-            # OpenRC不需要daemon-reload，直接返回成功
             if ! $executed; then
                 success=true
             fi
             ;;
         is-active)
-            # 按优先级检查服务状态
             if command -v systemctl >/dev/null 2>&1; then
                 if systemctl is-active --quiet "$service_name" 2>/dev/null; then
                     return 0
@@ -232,8 +223,6 @@ service_manager() {
             return 1
             ;;
     esac
-    
-    # 对于非查询操作，如果执行过返回成功，否则返回失败
     if $executed; then
         return 0
     else
@@ -634,8 +623,178 @@ create_sparse_file() {
     fi
 }
 
-# 创建和配置存储池（使用自定义路径）
-# 参数：$1=backend, $2=storage_path, $3=disk_nums
+create_lvm_restore_service() {
+    local loop_file="$1"
+    if command -v systemctl >/dev/null 2>&1; then
+        cat > /etc/systemd/system/incus-lvm-losetup.service <<EOF
+[Unit]
+Description=Setup loop device for Incus LVM storage pool
+Before=incus.service
+After=local-fs.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'if [ -f "$loop_file" ]; then if ! vgs incus_vg >/dev/null 2>&1; then existing_loop=\$(losetup -j "$loop_file" | cut -d: -f1); if [ -z "\$existing_loop" ]; then loop_dev=\$(losetup -f); losetup "\$loop_dev" "$loop_file"; fi; vgchange -ay incus_vg 2>/dev/null || true; fi; fi'
+ExecStop=/bin/bash -c 'vgchange -an incus_vg 2>/dev/null || true; losetup -d \$(losetup -j "$loop_file" | cut -d: -f1) 2>/dev/null || true'
+[Install]
+WantedBy=multi-user.target
+EOF
+        service_manager daemon-reload
+        service_manager enable incus-lvm-losetup.service
+    elif command -v rc-update >/dev/null 2>&1; then
+        cat > /etc/init.d/incus-lvm-losetup <<'EOF'
+#!/sbin/openrc-run
+description="Setup loop device for Incus LVM storage pool"
+depend() {
+    need localmount
+    before incusd
+}
+start() {
+    ebegin "Setting up LVM loop device for Incus"
+    LOOP_FILE="LOOP_FILE_PLACEHOLDER"
+    if [ ! -f "$LOOP_FILE" ]; then
+        eerror "LVM loop file $LOOP_FILE not found"
+        eend 1
+        return 1
+    fi
+    if ! vgs incus_vg >/dev/null 2>&1; then
+        existing_loop=$(losetup -j "$LOOP_FILE" | cut -d: -f1)
+        if [ -z "$existing_loop" ]; then
+            loop_dev=$(losetup -f)
+            losetup "$loop_dev" "$LOOP_FILE"
+        fi
+        vgchange -ay incus_vg 2>/dev/null || true
+    fi
+    eend 0
+}
+stop() {
+    ebegin "Stopping LVM loop device for Incus"
+    LOOP_FILE="LOOP_FILE_PLACEHOLDER"
+    vgchange -an incus_vg 2>/dev/null || true
+    losetup -d $(losetup -j "$LOOP_FILE" | cut -d: -f1) 2>/dev/null || true
+    eend 0
+}
+EOF
+        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-lvm-losetup
+        chmod +x /etc/init.d/incus-lvm-losetup
+        service_manager enable incus-lvm-losetup
+    else
+        cat > /usr/local/bin/incus-lvm-restore.sh <<EOF
+#!/bin/bash
+LOOP_FILE="$loop_file"
+if [ ! -f "\$LOOP_FILE" ]; then
+    exit 1
+fi
+if ! vgs incus_vg >/dev/null 2>&1; then
+    existing_loop=\$(losetup -j "\$LOOP_FILE" | cut -d: -f1)
+    if [ -z "\$existing_loop" ]; then
+        loop_dev=\$(losetup -f)
+        losetup "\$loop_dev" "\$LOOP_FILE"
+    fi
+    vgchange -ay incus_vg 2>/dev/null || true
+fi
+exit 0
+EOF
+        chmod +x /usr/local/bin/incus-lvm-restore.sh
+        if [ -f /etc/rc.local ]; then
+            if ! grep -q "incus-lvm-restore.sh" /etc/rc.local; then
+                sed -i '/^exit 0/i /usr/local/bin/incus-lvm-restore.sh' /etc/rc.local
+            fi
+        else
+            cat > /etc/rc.local <<'EOF'
+#!/bin/sh -e
+/usr/local/bin/incus-lvm-restore.sh
+exit 0
+EOF
+            chmod +x /etc/rc.local
+        fi
+    fi
+}
+
+create_zfs_restore_service() {
+    local loop_file="$1"
+    local zpool_name="$2"
+    if command -v systemctl >/dev/null 2>&1; then
+        cat > /etc/systemd/system/incus-zfs-import.service <<EOF
+[Unit]
+Description=Import ZFS pool for Incus storage
+Before=incus.service
+After=local-fs.target zfs-import.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'if [ -f "$loop_file" ]; then if ! zpool list "$zpool_name" >/dev/null 2>&1; then zpool import "$zpool_name" 2>/dev/null || zpool import -d \$(dirname "$loop_file") "$zpool_name" 2>/dev/null || true; fi; fi'
+ExecStop=/bin/bash -c 'zpool export "$zpool_name" 2>/dev/null || true'
+[Install]
+WantedBy=multi-user.target
+EOF
+        service_manager daemon-reload
+        service_manager enable incus-zfs-import.service
+    elif command -v rc-update >/dev/null 2>&1; then
+        cat > /etc/init.d/incus-zfs-import <<'EOF'
+#!/sbin/openrc-run
+description="Import ZFS pool for Incus storage"
+depend() {
+    need localmount
+    after zfs-import
+    before incusd
+}
+start() {
+    ebegin "Importing ZFS pool for Incus"
+    LOOP_FILE="LOOP_FILE_PLACEHOLDER"
+    ZPOOL_NAME="ZPOOL_NAME_PLACEHOLDER"
+    if [ ! -f "$LOOP_FILE" ]; then
+        eerror "ZFS loop file $LOOP_FILE not found"
+        eend 1
+        return 1
+    fi
+    if ! zpool list "$ZPOOL_NAME" >/dev/null 2>&1; then
+        zpool import "$ZPOOL_NAME" 2>/dev/null || zpool import -d $(dirname "$LOOP_FILE") "$ZPOOL_NAME" 2>/dev/null || true
+    fi
+    eend 0
+}
+stop() {
+    ebegin "Exporting ZFS pool for Incus"
+    ZPOOL_NAME="ZPOOL_NAME_PLACEHOLDER"
+    zpool export "$ZPOOL_NAME" 2>/dev/null || true
+    eend 0
+}
+EOF
+        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-zfs-import
+        sed -i "s|ZPOOL_NAME_PLACEHOLDER|$zpool_name|g" /etc/init.d/incus-zfs-import
+        chmod +x /etc/init.d/incus-zfs-import
+        service_manager enable incus-zfs-import
+    else
+        cat > /usr/local/bin/incus-zfs-restore.sh <<EOF
+#!/bin/bash
+LOOP_FILE="$loop_file"
+ZPOOL_NAME="$zpool_name"
+if [ ! -f "\$LOOP_FILE" ]; then
+    exit 1
+fi
+if ! zpool list "\$ZPOOL_NAME" >/dev/null 2>&1; then
+    zpool import "\$ZPOOL_NAME" 2>/dev/null || zpool import -d \$(dirname "\$LOOP_FILE") "\$ZPOOL_NAME" 2>/dev/null || true
+fi
+exit 0
+EOF
+        chmod +x /usr/local/bin/incus-zfs-restore.sh
+        if [ -f /etc/rc.local ]; then
+            if ! grep -q "incus-zfs-restore.sh" /etc/rc.local; then
+                sed -i '/^exit 0/i /usr/local/bin/incus-zfs-restore.sh' /etc/rc.local
+            fi
+        else
+            cat > /etc/rc.local <<'EOF'
+#!/bin/sh -e
+/usr/local/bin/incus-zfs-restore.sh
+exit 0
+EOF
+            chmod +x /etc/rc.local
+        fi
+    fi
+}
+
 create_storage_pool_with_custom_path() {
     local backend="$1"
     local storage_path="$2"
@@ -663,10 +822,8 @@ create_storage_pool_with_custom_path() {
         _green "创建 LVM 物理卷和卷组..."
         pvcreate "$loop_dev" >/dev/null 2>&1
         vgcreate incus_vg "$loop_dev" >/dev/null 2>&1
-        
-        # 保存 loop 设备信息以便重启后恢复
         echo "$loop_file" > "$storage_path/lvm_loop_file.txt"
-        
+        create_lvm_restore_service "$loop_file"
         temp=$(incus storage create default lvm source=incus_vg 2>&1)
         status=$?
     elif [ "$backend" = "btrfs" ]; then
@@ -698,13 +855,11 @@ create_storage_pool_with_custom_path() {
             _red "Mount failed!"
             return 1
         fi
-        # 添加到 /etc/fstab 以实现开机自动挂载
         if ! grep -q "$loop_file" /etc/fstab 2>/dev/null; then
             echo "$loop_file $mount_point btrfs loop 0 0" >> /etc/fstab
             _green "已添加到 /etc/fstab 实现开机自动挂载"
             _green "Added to /etc/fstab for automatic mounting on boot"
         fi
-        # 设置正确的权限
         chmod 711 "$mount_point"
         temp=$(incus storage create default btrfs source="$mount_point" 2>&1)
         status=$?
@@ -734,6 +889,9 @@ create_storage_pool_with_custom_path() {
             _red "ZFS pool creation failed!"
             return 1
         fi
+        echo "$loop_file" > "$storage_path/zfs_loop_file.txt"
+        echo "$zpool_name" > "$storage_path/zfs_pool_name.txt"
+        create_zfs_restore_service "$loop_file" "$zpool_name"
         temp=$(incus storage create default zfs source="$zpool_name" 2>&1)
         status=$?
     else
@@ -850,7 +1008,6 @@ init_storage_backend() {
         if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums"; then
             temp="Storage pool created successfully"
             status=0
-            # 确保网络也被正确初始化
             if ! incus network list 2>/dev/null | grep -q incusbr0; then
                 _yellow "网络未初始化，正在初始化网络配置..."
                 _yellow "Network not initialized, initializing network configuration..."
@@ -915,11 +1072,9 @@ init_storage_backend() {
 }
 
 setup_storage() {
-    # 检查是否有需要恢复的挂载点（系统重启后）
     if [ -f "/usr/local/bin/incus_storage_type" ]; then
         current_backend=$(cat /usr/local/bin/incus_storage_type)
         if [ "$current_backend" = "btrfs" ] && [ -f "/etc/fstab" ]; then
-            # 检查 fstab 中的 btrfs 挂载是否已挂载
             grep "btrfs_pool.img" /etc/fstab 2>/dev/null | while read -r line; do
                 mount_point=$(echo "$line" | awk '{print $2}')
                 if [ -n "$mount_point" ] && [ -d "$mount_point" ]; then
@@ -931,7 +1086,6 @@ setup_storage() {
                 fi
             done
         elif [ "$current_backend" = "lvm" ]; then
-            # 检查 LVM 卷组是否激活，如果没有则重新设置循环设备
             if ! vgs incus_vg >/dev/null 2>&1; then
                 for storage_dir in /data/incus-storage /var/lib/incus-storage /root/incus-storage; do
                     lvm_info="$storage_dir/lvm_loop_file.txt"
@@ -948,6 +1102,24 @@ setup_storage() {
                     fi
                 done
             fi
+        elif [ "$current_backend" = "zfs" ]; then
+            for storage_dir in /data/incus-storage /var/lib/incus-storage /root/incus-storage; do
+                zfs_pool_info="$storage_dir/zfs_pool_name.txt"
+                zfs_loop_info="$storage_dir/zfs_loop_file.txt"
+                if [ -f "$zfs_pool_info" ] && [ -f "$zfs_loop_info" ]; then
+                    zpool_name=$(cat "$zfs_pool_info")
+                    loop_file=$(cat "$zfs_loop_info")
+                    if [ -n "$zpool_name" ] && [ -f "$loop_file" ]; then
+                        if ! zpool list "$zpool_name" >/dev/null 2>&1; then
+                            _yellow "检测到 ZFS 存储池未导入，正在恢复..."
+                            _yellow "Detected ZFS storage pool not imported, recovering..."
+                            zpool import "$zpool_name" 2>/dev/null || \
+                                zpool import -d "$(dirname "$loop_file")" "$zpool_name" 2>/dev/null || true
+                        fi
+                        break
+                    fi
+                fi
+            done
         fi
     fi
     
@@ -1085,8 +1257,6 @@ configure_incus_settings() {
     incus config unset images.auto_update_interval
     incus config set images.auto_update_interval 0
     incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
-    
-    # 检查网络是否存在再配置
     if incus network list 2>/dev/null | grep -q incusbr0; then
         incus network set incusbr0 ipv6.address auto
         incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
@@ -1230,11 +1400,8 @@ main() {
     setup_firewall
     get_user_inputs
     setup_storage
-    
-    # 确保 incus 服务正在运行后再配置
     service_manager start incus 2>/dev/null || true
     sleep 3
-    
     configure_incus_settings
     optimize_system
     setup_iptables
