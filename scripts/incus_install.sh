@@ -663,6 +663,10 @@ create_storage_pool_with_custom_path() {
         _green "创建 LVM 物理卷和卷组..."
         pvcreate "$loop_dev" >/dev/null 2>&1
         vgcreate incus_vg "$loop_dev" >/dev/null 2>&1
+        
+        # 保存 loop 设备信息以便重启后恢复
+        echo "$loop_file" > "$storage_path/lvm_loop_file.txt"
+        
         temp=$(incus storage create default lvm source=incus_vg 2>&1)
         status=$?
     elif [ "$backend" = "btrfs" ]; then
@@ -694,6 +698,14 @@ create_storage_pool_with_custom_path() {
             _red "Mount failed!"
             return 1
         fi
+        # 添加到 /etc/fstab 以实现开机自动挂载
+        if ! grep -q "$loop_file" /etc/fstab 2>/dev/null; then
+            echo "$loop_file $mount_point btrfs loop 0 0" >> /etc/fstab
+            _green "已添加到 /etc/fstab 实现开机自动挂载"
+            _green "Added to /etc/fstab for automatic mounting on boot"
+        fi
+        # 设置正确的权限
+        chmod 711 "$mount_point"
         temp=$(incus storage create default btrfs source="$mount_point" 2>&1)
         status=$?
     elif [ "$backend" = "zfs" ]; then
@@ -810,7 +822,8 @@ init_storage_backend() {
     if incus network list >/dev/null 2>&1; then
         incus_initialized=true
     fi
-    if [ "$incus_initialized" = false ]; then
+    # 使用自定义存储路径时，不要先初始化，而是直接创建存储池后再初始化网络
+    if [ "$incus_initialized" = false ] && [ -z "$storage_path" ]; then
         _green "首次初始化 Incus..."
         _green "Initializing Incus for the first time..."
         temp=$(incus admin init --auto 2>&1)
@@ -837,6 +850,12 @@ init_storage_backend() {
         if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums"; then
             temp="Storage pool created successfully"
             status=0
+            # 确保网络也被正确初始化
+            if ! incus network list 2>/dev/null | grep -q incusbr0; then
+                _yellow "网络未初始化，正在初始化网络配置..."
+                _yellow "Network not initialized, initializing network configuration..."
+                incus admin init --auto >/dev/null 2>&1 || true
+            fi
         else
             temp="Failed to create storage pool with custom path"
             status=1
@@ -896,6 +915,42 @@ init_storage_backend() {
 }
 
 setup_storage() {
+    # 检查是否有需要恢复的挂载点（系统重启后）
+    if [ -f "/usr/local/bin/incus_storage_type" ]; then
+        current_backend=$(cat /usr/local/bin/incus_storage_type)
+        if [ "$current_backend" = "btrfs" ] && [ -f "/etc/fstab" ]; then
+            # 检查 fstab 中的 btrfs 挂载是否已挂载
+            grep "btrfs_pool.img" /etc/fstab 2>/dev/null | while read -r line; do
+                mount_point=$(echo "$line" | awk '{print $2}')
+                if [ -n "$mount_point" ] && [ -d "$mount_point" ]; then
+                    if ! mountpoint -q "$mount_point" 2>/dev/null; then
+                        _yellow "检测到未挂载的 btrfs 存储池，正在重新挂载..."
+                        _yellow "Detected unmounted btrfs storage pool, remounting..."
+                        mount "$mount_point" 2>/dev/null || true
+                    fi
+                fi
+            done
+        elif [ "$current_backend" = "lvm" ]; then
+            # 检查 LVM 卷组是否激活，如果没有则重新设置循环设备
+            if ! vgs incus_vg >/dev/null 2>&1; then
+                for storage_dir in /data/incus-storage /var/lib/incus-storage /root/incus-storage; do
+                    lvm_info="$storage_dir/lvm_loop_file.txt"
+                    if [ -f "$lvm_info" ]; then
+                        loop_file=$(cat "$lvm_info")
+                        if [ -f "$loop_file" ]; then
+                            _yellow "检测到 LVM 存储池未激活，正在恢复..."
+                            _yellow "Detected inactive LVM storage pool, recovering..."
+                            loop_dev=$(losetup -f)
+                            losetup "$loop_dev" "$loop_file" 2>/dev/null || true
+                            vgchange -ay incus_vg 2>/dev/null || true
+                            break
+                        fi
+                    fi
+                done
+            fi
+        fi
+    fi
+    
     if [ -f "/usr/local/bin/incus_reboot" ]; then
         REBOOT_BACKEND=$(cat /usr/local/bin/incus_reboot)
         _green "检测到系统重启，尝试继续使用 $REBOOT_BACKEND"
@@ -1030,11 +1085,18 @@ configure_incus_settings() {
     incus config unset images.auto_update_interval
     incus config set images.auto_update_interval 0
     incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
-    incus network set incusbr0 ipv6.address auto
-    incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
-    incus network set incusbr0 dns.mode managed
-    incus network set incusbr0 ipv4.dhcp true
-    incus network set incusbr0 ipv6.dhcp true
+    
+    # 检查网络是否存在再配置
+    if incus network list 2>/dev/null | grep -q incusbr0; then
+        incus network set incusbr0 ipv6.address auto
+        incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
+        incus network set incusbr0 dns.mode managed
+        incus network set incusbr0 ipv4.dhcp true
+        incus network set incusbr0 ipv6.dhcp true
+    else
+        _yellow "警告：incusbr0 网络不存在，跳过网络配置"
+        _yellow "Warning: incusbr0 network does not exist, skipping network configuration"
+    fi
 }
 
 optimize_system() {
@@ -1168,6 +1230,11 @@ main() {
     setup_firewall
     get_user_inputs
     setup_storage
+    
+    # 确保 incus 服务正在运行后再配置
+    service_manager start incus 2>/dev/null || true
+    sleep 3
+    
     configure_incus_settings
     optimize_system
     setup_iptables
