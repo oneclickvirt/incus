@@ -749,7 +749,6 @@ init_storage_backend() {
     else
         if [ -n "$storage_path" ]; then
             mkdir -p "$storage_path"
-            loop_file="$storage_path/${backend}_pool.img"
             if [ "$incus_initialized" = false ]; then
                 _green "首次初始化 Incus..."
                 _green "Initializing Incus for the first time..."
@@ -773,11 +772,18 @@ init_storage_backend() {
                     cat /tmp/incus_delete.log
                 fi
             fi
-            
-            # 使用 Incus 自动创建和格式化 loop 文件（类似 LXD 的做法）
+            # 让 Incus 自动创建和格式化循环文件
             _green "创建 ${backend} 存储池（Incus 将自动创建和格式化文件）..."
             _green "Creating ${backend} storage pool (Incus will automatically create and format the file)..."
-            temp=$(incus storage create default "$backend" size="${disk_nums}GB" source="$loop_file" 2>&1)
+            loop_file="$storage_path/${backend}_pool.img"
+            # 检查并删除旧文件（避免冲突）
+            if [ -f "$loop_file" ]; then
+                _yellow "检测到旧的循环文件，正在删除..."
+                _yellow "Detected old loop file, removing..."
+                rm -f "$loop_file"
+            fi
+            # 让 Incus 自动创建、格式化和挂载
+            temp=$(incus storage create default "$backend" source="$loop_file" size="${disk_nums}GB" 2>&1)
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         fi
@@ -810,8 +816,6 @@ init_storage_backend() {
                         cat /tmp/incus_delete.log
                     fi
                 fi
-                
-                # 使用 Incus 自动创建 LVM loop 文件
                 _green "创建 LVM 存储池（Incus 将自动创建文件）..."
                 _green "Creating LVM storage pool (Incus will automatically create the file)..."
                 temp=$(incus storage create default lvm size="${disk_nums}GB" source="$loop_file" lvm.vg_name=incus_vg 2>&1)
@@ -821,7 +825,6 @@ init_storage_backend() {
         else
             if [ -n "$storage_path" ]; then
                 mkdir -p "$storage_path"
-                loop_file="$storage_path/${backend}_pool.img"
                 temp=$(incus admin init --auto 2>&1)
                 _yellow "当前存储池列表："
                 _yellow "Current storage pools:"
@@ -841,11 +844,18 @@ init_storage_backend() {
                         cat /tmp/incus_delete.log
                     fi
                 fi
-                
-                # 使用 Incus 自动创建和格式化 loop 文件（类似 LXD 的做法）
+                # 让 Incus 自动创建和格式化循环文件
                 _green "创建 ${backend} 存储池（Incus 将自动创建和格式化文件）..."
                 _green "Creating ${backend} storage pool (Incus will automatically create and format the file)..."
-                temp=$(incus storage create default "$backend" size="${disk_nums}GB" source="$loop_file" 2>&1)
+                loop_file="$storage_path/${backend}_pool.img"
+                # 检查并删除旧文件（避免冲突）
+                if [ -f "$loop_file" ]; then
+                    _yellow "检测到旧的循环文件，正在删除..."
+                    _yellow "Detected old loop file, removing..."
+                    rm -f "$loop_file"
+                fi
+                # 让 Incus 自动创建、格式化和挂载
+                temp=$(incus storage create default "$backend" source="$loop_file" size="${disk_nums}GB" 2>&1)
             else
                 temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             fi
