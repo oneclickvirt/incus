@@ -605,6 +605,35 @@ is_storage_installed() {
     return 1
 }
 
+# 创建稀疏文件
+create_sparse_file() {
+    local file_path="$1"
+    local size_gb="$2"
+    if dd if=/dev/zero of="$file_path" bs=1G count=0 seek="${size_gb}" 2>/dev/null; then
+        _green "使用 dd 创建稀疏文件成功: $file_path (${size_gb}GB)"
+        _green "Successfully created sparse file using dd: $file_path (${size_gb}GB)"
+        return 0
+    else
+        _yellow "dd 创建失败，尝试使用 truncate..."
+        _yellow "dd failed, trying truncate..."
+        if command -v truncate >/dev/null 2>&1; then
+            if truncate -s "${size_gb}G" "$file_path" 2>/dev/null; then
+                _green "使用 truncate 创建稀疏文件成功: $file_path (${size_gb}GB)"
+                _green "Successfully created sparse file using truncate: $file_path (${size_gb}GB)"
+                return 0
+            else
+                _red "truncate 创建失败"
+                _red "truncate failed"
+                return 1
+            fi
+        else
+            _red "truncate 命令不可用，无法创建稀疏文件"
+            _red "truncate command not available, cannot create sparse file"
+            return 1
+        fi
+    fi
+}
+
 init_storage_backend() {
     local backend="$1"
     if is_storage_tried "$backend"; then
@@ -617,7 +646,10 @@ init_storage_backend() {
         _green "Using default dir type with unlimited storage pool size"
         echo "dir" >/usr/local/bin/incus_storage_type
         if [ -n "$storage_path" ]; then
-            incus admin init --storage-backend "$backend" --storage-pool-dir "$storage_path" --auto
+            mkdir -p "$storage_path"
+            incus admin init --auto
+            incus storage delete default 2>/dev/null || true
+            incus storage create default dir source="$storage_path"
         else
             # 默认挂载到 /var/lib/incus/storage-pools/default
             incus admin init --storage-backend "$backend" --auto 
@@ -677,13 +709,31 @@ init_storage_backend() {
     local temp
     if [ "$backend" = "lvm" ]; then
         if [ -n "$storage_path" ]; then
-            temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool-dir "$storage_path" --storage-pool lvm_pool --auto 2>&1)
+            mkdir -p "$storage_path"
+            temp=$(incus admin init --auto 2>&1)
+            incus storage delete default 2>/dev/null || true
+            loop_file="$storage_path/lvm_pool.img"
+            if ! create_sparse_file "$loop_file" "${disk_nums}"; then
+                _red "无法创建 LVM 循环文件"
+                _red "Failed to create LVM loop file"
+                return 1
+            fi
+            temp=$(incus storage create lvm_pool lvm source="$loop_file" lvm.vg_name=incus_vg 2>&1)
         else
             temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
         fi
     else
         if [ -n "$storage_path" ]; then
-            temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool-dir "$storage_path" --storage-pool default --auto 2>&1)
+            mkdir -p "$storage_path"
+            temp=$(incus admin init --auto 2>&1)
+            incus storage delete default 2>/dev/null || true
+            loop_file="$storage_path/${backend}_pool.img"
+            if ! create_sparse_file "$loop_file" "${disk_nums}"; then
+                _red "无法创建 ${backend} 循环文件"
+                _red "Failed to create ${backend} loop file"
+                return 1
+            fi
+            temp=$(incus storage create default "$backend" source="$loop_file" 2>&1)
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         fi
@@ -695,13 +745,31 @@ init_storage_backend() {
         incus.migrate
         if [ "$backend" = "lvm" ]; then
             if [ -n "$storage_path" ]; then
-                temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool-dir "$storage_path" --storage-pool lvm_pool --auto 2>&1)
+                mkdir -p "$storage_path"
+                temp=$(incus admin init --auto 2>&1)
+                incus storage delete default 2>/dev/null || true
+                loop_file="$storage_path/lvm_pool.img"
+                if ! create_sparse_file "$loop_file" "${disk_nums}"; then
+                    _red "无法创建 LVM 循环文件"
+                    _red "Failed to create LVM loop file"
+                    return 1
+                fi
+                temp=$(incus storage create lvm_pool lvm source="$loop_file" lvm.vg_name=incus_vg 2>&1)
             else
                 temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
             fi
         else
             if [ -n "$storage_path" ]; then
-                temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool-dir "$storage_path" --storage-pool default --auto 2>&1)
+                mkdir -p "$storage_path"
+                temp=$(incus admin init --auto 2>&1)
+                incus storage delete default 2>/dev/null || true
+                loop_file="$storage_path/${backend}_pool.img"
+                if ! create_sparse_file "$loop_file" "${disk_nums}"; then
+                    _red "无法创建 ${backend} 循环文件"
+                    _red "Failed to create ${backend} loop file"
+                    return 1
+                fi
+                temp=$(incus storage create default "$backend" source="$loop_file" 2>&1)
             else
                 temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             fi
@@ -754,7 +822,10 @@ setup_storage() {
     _yellow "All storage types failed, using dir as fallback"
     echo "dir" >/usr/local/bin/incus_storage_type
     if [ -n "$storage_path" ]; then
-        incus admin init --storage-backend dir --storage-pool-dir "$storage_path" --auto
+        mkdir -p "$storage_path"
+        incus admin init --auto
+        incus storage delete default 2>/dev/null || true
+        incus storage create default dir source="$storage_path"
     else
         incus admin init --storage-backend dir --auto
     fi
