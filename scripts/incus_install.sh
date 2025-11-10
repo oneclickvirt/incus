@@ -707,33 +707,77 @@ init_storage_backend() {
         exit 1
     fi
     local temp
+    local incus_initialized=false
+    if incus network list >/dev/null 2>&1; then
+        incus_initialized=true
+    fi
     if [ "$backend" = "lvm" ]; then
         if [ -n "$storage_path" ]; then
             mkdir -p "$storage_path"
-            temp=$(incus admin init --auto 2>&1)
-            incus storage delete default 2>/dev/null || true
             loop_file="$storage_path/lvm_pool.img"
-            if ! create_sparse_file "$loop_file" "${disk_nums}"; then
-                _red "无法创建 LVM 循环文件"
-                _red "Failed to create LVM loop file"
-                return 1
+            if [ "$incus_initialized" = false ]; then
+                _green "首次初始化 Incus..."
+                _green "Initializing Incus for the first time..."
+                temp=$(incus admin init --auto 2>&1)
             fi
-            temp=$(incus storage create lvm_pool lvm source="$loop_file" lvm.vg_name=incus_vg 2>&1)
+            _yellow "当前存储池列表："
+            _yellow "Current storage pools:"
+            incus storage list 2>/dev/null || true
+            if incus storage list 2>/dev/null | grep -q "^| default"; then
+                _yellow "检测到 default 存储池存在，尝试删除..."
+                _yellow "Default storage pool exists, trying to delete..."
+                incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
+                    [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
+                done
+                if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
+                    _green "成功删除 default 存储池"
+                    _green "Successfully deleted default storage pool"
+                else
+                    _red "删除 default 存储池失败："
+                    _red "Failed to delete default storage pool:"
+                    cat /tmp/incus_delete.log
+                fi
+            fi
+            
+            # 使用 Incus 自动创建 LVM loop 文件
+            _green "创建 LVM 存储池（Incus 将自动创建文件）..."
+            _green "Creating LVM storage pool (Incus will automatically create the file)..."
+            temp=$(incus storage create default lvm size="${disk_nums}GB" source="$loop_file" lvm.vg_name=incus_vg 2>&1)
         else
-            temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+            temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         fi
     else
         if [ -n "$storage_path" ]; then
             mkdir -p "$storage_path"
-            temp=$(incus admin init --auto 2>&1)
-            incus storage delete default 2>/dev/null || true
             loop_file="$storage_path/${backend}_pool.img"
-            if ! create_sparse_file "$loop_file" "${disk_nums}"; then
-                _red "无法创建 ${backend} 循环文件"
-                _red "Failed to create ${backend} loop file"
-                return 1
+            if [ "$incus_initialized" = false ]; then
+                _green "首次初始化 Incus..."
+                _green "Initializing Incus for the first time..."
+                temp=$(incus admin init --auto 2>&1)
             fi
-            temp=$(incus storage create default "$backend" source="$loop_file" 2>&1)
+            _yellow "当前存储池列表："
+            _yellow "Current storage pools:"
+            incus storage list 2>/dev/null || true
+            if incus storage list 2>/dev/null | grep -q "^| default"; then
+                _yellow "检测到 default 存储池存在，尝试删除..."
+                _yellow "Default storage pool exists, trying to delete..."
+                incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
+                    [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
+                done
+                if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
+                    _green "成功删除 default 存储池"
+                    _green "Successfully deleted default storage pool"
+                else
+                    _red "删除 default 存储池失败："
+                    _red "Failed to delete default storage pool:"
+                    cat /tmp/incus_delete.log
+                fi
+            fi
+            
+            # 使用 Incus 自动创建和格式化 loop 文件（类似 LXD 的做法）
+            _green "创建 ${backend} 存储池（Incus 将自动创建和格式化文件）..."
+            _green "Creating ${backend} storage pool (Incus will automatically create and format the file)..."
+            temp=$(incus storage create default "$backend" size="${disk_nums}GB" source="$loop_file" 2>&1)
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         fi
@@ -746,30 +790,62 @@ init_storage_backend() {
         if [ "$backend" = "lvm" ]; then
             if [ -n "$storage_path" ]; then
                 mkdir -p "$storage_path"
-                temp=$(incus admin init --auto 2>&1)
-                incus storage delete default 2>/dev/null || true
                 loop_file="$storage_path/lvm_pool.img"
-                if ! create_sparse_file "$loop_file" "${disk_nums}"; then
-                    _red "无法创建 LVM 循环文件"
-                    _red "Failed to create LVM loop file"
-                    return 1
+                temp=$(incus admin init --auto 2>&1)
+                _yellow "当前存储池列表："
+                _yellow "Current storage pools:"
+                incus storage list 2>/dev/null || true
+                if incus storage list 2>/dev/null | grep -q "^| default"; then
+                    _yellow "检测到 default 存储池存在，尝试删除..."
+                    _yellow "Default storage pool exists, trying to delete..."
+                    incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
+                        [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
+                    done
+                    if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
+                        _green "成功删除 default 存储池"
+                        _green "Successfully deleted default storage pool"
+                    else
+                        _red "删除 default 存储池失败："
+                        _red "Failed to delete default storage pool:"
+                        cat /tmp/incus_delete.log
+                    fi
                 fi
-                temp=$(incus storage create lvm_pool lvm source="$loop_file" lvm.vg_name=incus_vg 2>&1)
+                
+                # 使用 Incus 自动创建 LVM loop 文件
+                _green "创建 LVM 存储池（Incus 将自动创建文件）..."
+                _green "Creating LVM storage pool (Incus will automatically create the file)..."
+                temp=$(incus storage create default lvm size="${disk_nums}GB" source="$loop_file" lvm.vg_name=incus_vg 2>&1)
             else
-                temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool lvm_pool --auto 2>&1)
+                temp=$(incus admin init --storage-backend lvm --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             fi
         else
             if [ -n "$storage_path" ]; then
                 mkdir -p "$storage_path"
-                temp=$(incus admin init --auto 2>&1)
-                incus storage delete default 2>/dev/null || true
                 loop_file="$storage_path/${backend}_pool.img"
-                if ! create_sparse_file "$loop_file" "${disk_nums}"; then
-                    _red "无法创建 ${backend} 循环文件"
-                    _red "Failed to create ${backend} loop file"
-                    return 1
+                temp=$(incus admin init --auto 2>&1)
+                _yellow "当前存储池列表："
+                _yellow "Current storage pools:"
+                incus storage list 2>/dev/null || true
+                if incus storage list 2>/dev/null | grep -q "^| default"; then
+                    _yellow "检测到 default 存储池存在，尝试删除..."
+                    _yellow "Default storage pool exists, trying to delete..."
+                    incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
+                        [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
+                    done
+                    if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
+                        _green "成功删除 default 存储池"
+                        _green "Successfully deleted default storage pool"
+                    else
+                        _red "删除 default 存储池失败："
+                        _red "Failed to delete default storage pool:"
+                        cat /tmp/incus_delete.log
+                    fi
                 fi
-                temp=$(incus storage create default "$backend" source="$loop_file" 2>&1)
+                
+                # 使用 Incus 自动创建和格式化 loop 文件（类似 LXD 的做法）
+                _green "创建 ${backend} 存储池（Incus 将自动创建和格式化文件）..."
+                _green "Creating ${backend} storage pool (Incus will automatically create and format the file)..."
+                temp=$(incus storage create default "$backend" size="${disk_nums}GB" source="$loop_file" 2>&1)
             else
                 temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             fi
