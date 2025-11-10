@@ -270,12 +270,13 @@ check_standard_images() {
 
 create_container() {
     rm -rf "$name"
+    # 确保使用 default 存储池创建容器
     if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
     elif [ -z "$image_download_url" ]; then
-        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
     else
-        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB
+        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
     fi
     if [ $? -ne 0 ]; then
         echo "Container creation failed, please check the previous output message"
@@ -285,27 +286,19 @@ create_container() {
 }
 
 configure_storage() {
-    if [ -f /usr/local/bin/incus_storage_type ]; then
-        storage_type=$(cat /usr/local/bin/incus_storage_type)
-    else
-        storage_type="btrfs"
-    fi
+    # 配置容器的磁盘大小限制
     if [[ $disk == *.* ]]; then
         disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
-        incus storage create "$name" "$storage_type" size="$disk_mb"MB >/dev/null 2>&1
-        incus config device override "$name" root size="$disk_mb"MB
-        incus config device set "$name" root limits.max "$disk_mb"MB
+        incus config device set "$name" root size="${disk_mb}MB" 2>/dev/null || true
     else
-        incus storage create "$name" "$storage_type" size="$disk"GB >/dev/null 2>&1
-        incus config device override "$name" root size="$disk"GB
-        incus config device set "$name" root limits.max "$disk"GB
+        incus config device set "$name" root size="${disk}GB" 2>/dev/null || true
     fi
 }
 
 configure_limits() {
-    # IO
-    incus config device set "$name" root limits.read 500MB
-    incus config device set "$name" root limits.write 500MB
+    # IO - 注意：read 和 write 有两个指标（带宽和IOPS），需要分别设置
+    # 但 incus 的 limits.read 和 limits.write 只能设置带宽或IOPS其中之一
+    # 这里我们优先设置 IOPS 限制
     incus config device set "$name" root limits.read 5000iops
     incus config device set "$name" root limits.write 5000iops
     # CPU

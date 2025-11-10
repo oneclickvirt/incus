@@ -102,7 +102,7 @@ create_base_container() {
                 incus image import incus.tar.xz rootfs.squashfs --alias "debian11-${sys_bit}"
                 rm -rf incus.tar.xz rootfs.squashfs "$image_file"
                 echo "自定义镜像导入成功，创建容器..."
-                incus init "debian11-${sys_bit}" "$container_name" -c limits.cpu=1 -c limits.memory=128MiB
+                incus init "debian11-${sys_bit}" "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -s default
                 if [ $? -eq 0 ]; then
                     echo "使用自定义镜像创建容器成功"
                     return 0
@@ -117,34 +117,31 @@ create_base_container() {
     fi
     # 备用方法：使用原有的镜像源
     echo "使用原有方法创建容器..."
-    incus init images:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB
+    incus init images:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -s default
     if [ $? -ne 0 ]; then
-        incus init opsmaru:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB
+        incus init opsmaru:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -s default
     fi
 }
 
 setup_storage() {
     local container_name="$1"
-    if [ -f /usr/local/bin/incus_storage_type ]; then
-        storage_type=$(cat /usr/local/bin/incus_storage_type)
-    else
-        storage_type="btrfs"
-    fi
-    incus storage create "$container_name" "$storage_type" size=1GB >/dev/null 2>&1
+    echo "Configuring storage for container: $container_name"
+    
+    # 设置磁盘大小
+    incus config device set "$container_name" root size=1GB 2>/dev/null || true
 }
 
 configure_resources() {
     local container_name="$1"
-    incus config device override "$container_name" root size=1GB
-    incus config device set "$container_name" root limits.max 1GB
-    incus config device set "$container_name" root limits.read 500MB
-    incus config device set "$container_name" root limits.write 500MB
-    incus config device set "$container_name" root limits.read 5000iops
-    incus config device set "$container_name" root limits.write 5000iops
+    # 设置 IO 限制
+    incus config device set "$container_name" root limits.read 5000iops 2>/dev/null || true
+    incus config device set "$container_name" root limits.write 5000iops 2>/dev/null || true
+    # 设置网络限制
     incus config device override "$container_name" eth0 \
                                 limits.egress=300Mbit \
                                 limits.ingress=300Mbit \
-                                limits.max=300Mbit
+                                limits.max=300Mbit 2>/dev/null || true
+    # 设置 CPU 和内存限制
     incus config set "$container_name" limits.cpu.priority 0
     incus config set "$container_name" limits.cpu.allowance 50%
     incus config set "$container_name" limits.cpu.allowance 25ms/100ms
