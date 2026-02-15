@@ -270,13 +270,21 @@ check_standard_images() {
 
 create_container() {
     rm -rf "$name"
-    # 确保使用 default 存储池创建容器
-    if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
-        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
-    elif [ -z "$image_download_url" ]; then
-        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
+    # 确保使用 default 存储池创建容器，并直接设置磁盘大小限制
+    local disk_size
+    if [[ $disk == *.* ]]; then
+        disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
+        disk_size="${disk_mb}MiB"
     else
-        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -s default
+        disk_size="${disk}GiB"
+    fi
+    
+    if [ -z "$image_download_url" ] && [ "$status_tuna" = true ]; then
+        incus init opsmaru:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk_size}" -s default
+    elif [ -z "$image_download_url" ]; then
+        incus init images:${system} "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk_size}" -s default
+    else
+        incus init "$image_name" "$name" -c limits.cpu="$cpu" -c limits.memory="$memory"MiB -d root,size="${disk_size}" -s default
     fi
     if [ $? -ne 0 ]; then
         echo "Container creation failed, please check the previous output message"
@@ -286,13 +294,9 @@ create_container() {
 }
 
 configure_storage() {
-    # 配置容器的磁盘大小限制
-    if [[ $disk == *.* ]]; then
-        disk_mb=$(echo "$disk * 1024" | bc | cut -d '.' -f 1)
-        incus config device set "$name" root size="${disk_mb}MB" 2>/dev/null || true
-    else
-        incus config device set "$name" root size="${disk}GB" 2>/dev/null || true
-    fi
+    # 磁盘大小限制已在创建容器时通过 -d root,size= 参数设置
+    # 此函数保留用于未来可能的其他存储配置
+    :
 }
 
 configure_limits() {
@@ -559,7 +563,6 @@ main() {
     check_cdn_file
     handle_image
     create_container
-    configure_storage
     configure_limits
     setup_container
     cleanup_and_finish

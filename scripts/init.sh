@@ -123,9 +123,10 @@ create_base_container() {
   fi
   # 备用方法：使用原有的镜像源
   echo "使用原有方法创建容器..."
-  incus init images:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -s default
+  # 在创建时直接设置磁盘大小限制
+  incus init images:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s default
   if [ $? -ne 0 ]; then
-    incus init opsmaru:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -s default
+    incus init opsmaru:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s default
   fi
 }
 
@@ -133,8 +134,7 @@ configure_storage() {
   local prefix=$1
   echo "Configuring storage for container: $prefix"
   
-  # 设置磁盘大小
-  incus config device set "$prefix" root size=1GB 2>/dev/null || true
+  # 磁盘大小已在创建时通过 -d root,size= 设置
   
   # 设置 IO 限制
   incus config device set "$prefix" root limits.read 5000iops 2>/dev/null || true
