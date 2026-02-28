@@ -1,6 +1,6 @@
 #!/bin/bash
 # from https://github.com/oneclickvirt/incus
-# 2023.06.29
+# 2026.02.28
 
 # 容器内屏蔽安装包
 if ! dpkg -s apparmor &>/dev/null; then

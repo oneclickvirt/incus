@@ -3,7 +3,7 @@
 # https://github.com/oneclickvirt/incus
 # cd /root
 # ./init.sh NAT服务器前缀 数量
-# 2025.08.03
+# 2026.02.28
 
 cd /root >/dev/null 2>&1
 if [ ! -d "/usr/local/bin" ]; then

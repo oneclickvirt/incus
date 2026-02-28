@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2024.04.14
+# 2026.02.28
 
 # cd /root
 red() { echo -e "\033[31m\033[01m$@\033[0m"; }
