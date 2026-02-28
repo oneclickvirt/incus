@@ -8,11 +8,7 @@ if ! dpkg -s apparmor &>/dev/null; then
 fi
 containers=$(incus list -c n | awk '{print $2}')
 for container_name in $containers; do
-    echo "incus profile set $container_name restrictions" \
-        "apparmor='/usr/bin/zmap Cx,'\
-      '/usr/bin/nmap Cx,'\
-      '/usr/bin/masscan Cx,'\
-      '/usr/bin/medusa Cx,'"
+    incus profile set "$container_name" raw.apparmor "deny /usr/bin/zmap x, deny /usr/bin/nmap x, deny /usr/bin/masscan x, deny /usr/bin/medusa x,"
 done
 
 # 容器屏蔽安装包

@@ -307,7 +307,6 @@ configure_limits() {
     incus config device set "$name" root limits.write 5000iops
     # CPU
     incus config set "$name" limits.cpu.priority 0
-    incus config set "$name" limits.cpu.allowance 50%
     incus config set "$name" limits.cpu.allowance 25ms/100ms
     # Memory
     incus config set "$name" limits.memory.swap true
@@ -476,7 +475,7 @@ configure_network() {
     echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
-            incus exec "$name" -- echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
+            incus exec "$name" -- /bin/bash -c '(crontab -l 2>/dev/null; echo "*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb") | crontab -'
             sleep 1
             if [ ! -f "./build_ipv6_network.sh" ]; then
                 curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh
@@ -532,7 +531,7 @@ cleanup_and_finish() {
     if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
         echo "$name $sshn $passwd $nat1 $nat2" >>"$name"
         echo "$name $sshn $passwd $nat1 $nat2"
-        exit 1
+        exit 0
     fi
     if [ "$nat1" == "0" ] && [ "$nat2" == "0" ]; then
         echo "$name $sshn $passwd" >>"$name"

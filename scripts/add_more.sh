@@ -189,7 +189,7 @@ build_new_containers() {
     case "${sysarch}" in
     "x86_64" | "x86" | "amd64" | "x64") sys_bit="x86_64" ;;
     "i386" | "i686") sys_bit="i686" ;;
-    "aarch64" | "armv8" | "armv8l") sys_bit="aarch64" ;;
+    "aarch64" | "armv8" | "armv8l") sys_bit="arm64" ;;
     "armv7l") sys_bit="armv7l" ;;
     "s390x") sys_bit="s390x" ;;
     "ppc64le") sys_bit="ppc64le" ;;
