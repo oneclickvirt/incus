@@ -65,7 +65,9 @@ fi
 # ==============================
 _green "[3/9] 删除 Incus 网络 / Deleting Incus networks..."
 if command -v incus >/dev/null 2>&1; then
-    for net in $(incus network list --format csv 2>/dev/null | awk -F, '{print $1}'); do
+    # 仅删除 incus 自身创建的网桥（名称以 incus 开头，如 incusbr0），跳过物理接口
+    # Only delete bridges created by Incus (name starts with "incus"), skip physical interfaces
+    for net in $(incus network list --format csv 2>/dev/null | awk -F, '{print $1}' | grep '^incus'); do
         _yellow "  删除网络 / Deleting network: $net"
         incus network delete "$net" 2>/dev/null || true
     done
@@ -235,6 +237,13 @@ fi
 # 删除 incus 数据目录
 if [ -d /var/lib/incus ]; then
     _yellow "  删除 Incus 数据目录 / Removing /var/lib/incus"
+    # 卸载所有挂载在该目录下的文件系统（从深到浅）
+    # Unmount all filesystems under this directory (deepest first)
+    while IFS= read -r mount_point; do
+        _yellow "  卸载挂载点 / Unmounting: $mount_point"
+        umount -l "$mount_point" 2>/dev/null || true
+    done < <(mount | awk '{print $3}' | grep '^/var/lib/incus' | sort -r)
+    sync
     rm -rf /var/lib/incus
 fi
 if [ -d /var/cache/incus ]; then
