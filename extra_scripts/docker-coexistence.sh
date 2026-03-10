@@ -136,6 +136,11 @@ check_cdn() {
 }
 
 check_cdn_file() {
+    if [ "${WITHOUTCDN,,}" = "true" ]; then
+        export cdn_success_url=""
+        echo "WITHOUTCDN=TRUE, skip CDN acceleration"
+        return
+    fi
     check_cdn "https://raw.githubusercontent.com/spiritLHLS/ecs/main/back/test"
     if [ -n "$cdn_success_url" ]; then
         echo "CDN available, using CDN"
