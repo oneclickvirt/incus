@@ -10,22 +10,6 @@
 
 [更新日志](CHANGELOG.md)
 
-## 禁用 CDN 加速
-
-如需完全禁用 CDN 加速地址，可在执行脚本前设置：
-
-```bash
-export WITHOUTCDN=TRUE
-```
-
-也可仅对单次命令生效：
-
-```bash
-WITHOUTCDN=TRUE bash incus_install.sh
-```
-
-设置后，脚本执行过程中将不再尝试使用 CDN 加速地址。
-
 ## 说明文档
 
 国内(China Docs)：
