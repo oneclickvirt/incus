@@ -1,6 +1,24 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
 # 2025.11.10
+#
+# 支持以下环境变量实现一键非交互式安装 / Supported env vars for non-interactive one-click install:
+#
+#   INCUS_NONINTERACTIVE=true   跳过所有交互提示，使用默认值或其他环境变量值
+#                               Skip all interactive prompts; use defaults or other env var values
+#
+#   INCUS_STORAGE_PATH=<path>   自定义存储池路径，如 /data/incus-storage（留空则使用系统默认）
+#                               Custom storage pool path, e.g. /data/incus-storage (empty = system default)
+#
+#   INCUS_DISK_SIZE=<GB>        存储池大小（正整数，单位 GB），如 50
+#                               Storage pool size in GB (positive integer), e.g. 50
+#
+#   WITHOUTCDN=true             跳过 CDN 加速，直连 GitHub
+#                               Skip CDN acceleration, connect to GitHub directly
+#
+# 示例 / Example:
+#   INCUS_NONINTERACTIVE=true INCUS_DISK_SIZE=50 bash incus_install.sh
+#   INCUS_NONINTERACTIVE=true INCUS_STORAGE_PATH=/data/incus-storage INCUS_DISK_SIZE=80 bash incus_install.sh
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -1169,9 +1187,23 @@ setup_storage() {
 }
 
 get_user_inputs() {
-    if [ "${noninteractive:-false}" = true ]; then
-        available_space=$(get_available_space)
-        disk_nums=$((available_space - 1))
+    # 兼容旧版 noninteractive 变量，同时支持新的 INCUS_NONINTERACTIVE 环境变量
+    local _noninteractive="${INCUS_NONINTERACTIVE:-${noninteractive:-false}}"
+
+    # ---- storage_path ----
+    # 优先使用 INCUS_STORAGE_PATH 环境变量（即使值为空也视为"已指定，不使用自定义路径"）
+    if [[ -v INCUS_STORAGE_PATH ]]; then
+        storage_path="${INCUS_STORAGE_PATH}"
+        if [ -n "$storage_path" ]; then
+            if [ ! -d "$storage_path" ]; then
+                mkdir -p "$storage_path" 2>/dev/null || {
+                    _yellow "Warning: failed to create INCUS_STORAGE_PATH=$storage_path, falling back to system default."
+                    storage_path=""
+                }
+            fi
+            [ -n "$storage_path" ] && _green "使用环境变量指定的存储路径 / Using storage path from env: $storage_path"
+        fi
+    elif [ "$_noninteractive" = "true" ]; then
         storage_path=""
     else
         while true; do
@@ -1211,6 +1243,17 @@ get_user_inputs() {
         else
             storage_path=""
         fi
+    fi
+
+    # ---- disk_nums ----
+    # 优先使用 INCUS_DISK_SIZE 环境变量
+    if [[ "${INCUS_DISK_SIZE:-}" =~ ^[1-9][0-9]*$ ]]; then
+        disk_nums="$INCUS_DISK_SIZE"
+        _green "使用环境变量指定的存储池大小 / Using disk size from env: ${disk_nums}GB"
+    elif [ "$_noninteractive" = "true" ]; then
+        available_space=$(get_available_space)
+        disk_nums=$((available_space - 1))
+    else
         while true; do
             _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the storage pool reaches 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
             reading "宿主机需要开设多大的存储池？(存储池就是容器硬盘之和的大小，推荐存储池达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums

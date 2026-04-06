@@ -2,6 +2,11 @@
 # by https://github.com/oneclickvirt/incus
 # 2026.03.09
 # 卸载 incus 及其所有相关环境 / Uninstall incus and all related environments
+#
+# 支持以下环境变量实现一键非交互式卸载 / Supported env vars for non-interactive one-click uninstall:
+#
+#   INCUS_FORCE_UNINSTALL=true   跳过确认提示，直接执行卸载（用于自动化/脚本调用）
+#                                Skip confirmation prompt and uninstall directly (for automation/scripting)
 
 cd /root >/dev/null 2>&1
 
@@ -16,6 +21,24 @@ if [[ $EUID -ne 0 ]]; then
     _red "请使用 root 权限运行此脚本！"
     _red "Please run this script as root!"
     exit 1
+fi
+
+# ==============================
+# 确认操作 / Confirm operation
+# ==============================
+if [ "${INCUS_FORCE_UNINSTALL:-false}" != "true" ]; then
+    _yellow "警告：此操作将彻底卸载 Incus 及其所有相关环境！"
+    _yellow "WARNING: This will completely uninstall Incus and ALL related environments!"
+    _yellow "包括所有容器、虚拟机、镜像、存储池和配置文件。"
+    _yellow "This includes all containers, VMs, images, storage pools and config files."
+    _yellow ""
+    _yellow "若要跳过此确认，请设置环境变量：INCUS_FORCE_UNINSTALL=true"
+    _yellow "To skip this prompt, set env var: INCUS_FORCE_UNINSTALL=true"
+    read -rp "$(echo -e "\033[33m\033[01m确认继续？(输入 yes 继续，其他输入退出) / Confirm? (type 'yes' to continue): \033[0m")" _confirm
+    if [ "$_confirm" != "yes" ]; then
+        _red "操作已取消 / Operation cancelled"
+        exit 0
+    fi
 fi
 
 _yellow "=========================================="
