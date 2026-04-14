@@ -711,20 +711,38 @@ setup_iptables_ipv6() {
     local subnet_prefix=$3
     local ipv6_length=$4
     local interface=$5
-    local use_firewalld=false
-    if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-        use_firewalld=true
-    fi
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
     check_cdn_file
+    # Try to ensure nftables is available
+    local use_nft=false
+    if command -v nft >/dev/null 2>&1; then
+        use_nft=true
+    else
+        $PACKAGETYPE_INSTALL nftables >/dev/null 2>&1 || true
+        if command -v nft >/dev/null 2>&1; then
+            use_nft=true
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl enable nftables 2>/dev/null || true
+                systemctl start nftables 2>/dev/null || true
+            fi
+        fi
+    fi
+    # Find available IPv6 address
     for i in $(seq 3 65535); do
         IPV6="${subnet_prefix}$i"
         [[ $IPV6 == $container_ipv6 ]] && continue
         ip -6 addr show dev "$interface" | grep -qw "$IPV6" && continue
         if ! ping6 -c1 -w1 -q "$IPV6" &>/dev/null; then
-            if ! ip6tables -t nat -C PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" &>/dev/null; then
-                _green "$IPV6"
-                break
+            if [ "$use_nft" = true ]; then
+                if ! nft list ruleset 2>/dev/null | grep -q "dnat ip6 to $container_ipv6" 2>/dev/null || ! nft list ruleset 2>/dev/null | grep -q "$IPV6" 2>/dev/null; then
+                    _green "$IPV6"
+                    break
+                fi
+            else
+                if ! ip6tables -t nat -C PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" &>/dev/null; then
+                    _green "$IPV6"
+                    break
+                fi
             fi
         fi
         _yellow "$IPV6"
@@ -735,42 +753,49 @@ setup_iptables_ipv6() {
         exit 1
     fi
     ip addr add "$IPV6"/"$ipv6_length" dev "$interface"
-    if [ "$use_firewalld" = true ]; then
-        service_manager enable
+    if [ "$use_nft" = true ]; then
+        # Use nftables for IPv6 DNAT (handles v6 natively)
+        nft add table ip6 incus_ipv6_nat 2>/dev/null || true
+        nft add chain ip6 incus_ipv6_nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+        nft add rule ip6 incus_ipv6_nat prerouting ip6 daddr "$IPV6" dnat to "$container_ipv6"
+        # Persist only our own tables, not incusd's managed 'incus' table
+        {
+            nft list table ip6 incus_ipv6_nat 2>/dev/null || true
+            nft list table inet incus_masq 2>/dev/null || true
+            nft list table inet incus_block 2>/dev/null || true
+        } > /etc/nftables.conf
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable nftables 2>/dev/null || true
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        service_manager enable firewalld
         service_manager start firewalld
         sleep 3
-        firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d $IPV6 -j DNAT --to-destination $container_ipv6
+        firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
         firewall-cmd --reload
     else
-        ip6tables -t nat -A PREROUTING -d $IPV6 -j DNAT --to-destination $container_ipv6
+        # Fallback to ip6tables with persistence
+        ip6tables -t nat -A PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
+        if command -v apt >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+        fi
+        mkdir -p /etc/iptables
+        ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save 2>/dev/null || true
+        fi
     fi
+    # Install add-ipv6 reboot restoration service
     if [ ! -f /usr/local/bin/add-ipv6.sh ]; then
         wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.sh -O /usr/local/bin/add-ipv6.sh
         chmod +x /usr/local/bin/add-ipv6.sh
-    else
-        echo "Script already exists. Skipping installation."
     fi
     if [ ! -f /etc/systemd/system/add-ipv6.service ]; then
         wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.service -O /etc/systemd/system/add-ipv6.service
         chmod +x /etc/systemd/system/add-ipv6.service
         service_manager daemon-reload
-        service_manager enable
+        service_manager enable add-ipv6.service
         service_manager start add-ipv6.service
-    else
-        echo "Service already exists. Skipping installation."
-    fi
-    mkdir -p /etc/iptables
-    ip6tables-save >/etc/iptables/rules.v6
-    if command -v apt >/dev/null 2>&1; then
-        install_package netfilter-persistent
-        netfilter-persistent save
-        netfilter-persistent reload
-        service netfilter-persistent restart
-    elif [ "$use_firewalld" = true ]; then
-        service_manager restart firewalld
-    else
-        echo "Unsupported system: cannot persist ip6tables rules"
-        exit 1
     fi
     if ping6 -c 3 "$IPV6" &>/dev/null; then
         _green "$container_name The external IPV6 address of the container is $IPV6"

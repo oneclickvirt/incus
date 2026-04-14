@@ -22,6 +22,21 @@ check_vm_support() {
         echo "此系统仅支持LXC容器"
         exit 1
     fi
+    # Detect KVM hardware acceleration availability
+    KVM_AVAILABLE=false
+    if [ -e /dev/kvm ]; then
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            KVM_AVAILABLE=true
+            echo "KVM hardware acceleration is available"
+            echo "KVM硬件加速可用"
+        else
+            echo "Warning: /dev/kvm exists but is not accessible, will use QEMU TCG software emulation"
+            echo "警告：/dev/kvm存在但不可访问，将使用QEMU TCG软件模拟"
+        fi
+    else
+        echo "Warning: KVM not available (/dev/kvm not found), will use QEMU TCG software emulation (slower)"
+        echo "警告：KVM不可用（/dev/kvm未找到），将使用QEMU TCG软件模拟（较慢）"
+    fi
     echo "VM support confirmed - qemu driver is available"
     echo "已确认支持虚拟机 - qemu驱动可用"
 }
@@ -357,6 +372,12 @@ configure_limits() {
     incus config set "$name" limits.cpu.priority 0
     incus config set "$name" limits.memory.swap true
     incus config set "$name" security.secureboot false
+    # If KVM is not available, configure for QEMU TCG software emulation
+    if [ "$KVM_AVAILABLE" = false ]; then
+        echo "Configuring VM for QEMU TCG software emulation..."
+        echo "配置虚拟机使用QEMU TCG软件模拟..."
+        incus config set "$name" raw.qemu="-accel tcg,thread=multi -cpu max"
+    fi
 }
 
 setup_vm() {

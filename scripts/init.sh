@@ -167,10 +167,67 @@ configure_resources() {
 
 block_ports() {
   local blocked_ports=(3389 8888 54321 65432)
-  for port in "${blocked_ports[@]}"; do
-    iptables --ipv4 -I FORWARD -o eth0 -p tcp --dport ${port} -j DROP
-    iptables --ipv4 -I FORWARD -o eth0 -p udp --dport ${port} -j DROP
-  done
+  # Detect primary outbound interface
+  local iface
+  iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+  if [ -z "$iface" ]; then
+    iface=$(ls /sys/class/net/ 2>/dev/null | grep -v lo | grep -v 'veth\|br\|incus\|docker\|tap' | head -1)
+  fi
+  if [ -z "$iface" ]; then
+    iface="eth0"
+  fi
+  # Try nftables first
+  if command -v nft >/dev/null 2>&1; then
+    nft add table inet incus_block 2>/dev/null || true
+    nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+    for port in "${blocked_ports[@]}"; do
+      nft add rule inet incus_block forward oifname "$iface" tcp dport "$port" drop 2>/dev/null || true
+      nft add rule inet incus_block forward oifname "$iface" udp dport "$port" drop 2>/dev/null || true
+    done
+    # Only save our own tables, not incusd's managed 'incus' table
+    { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl enable nftables 2>/dev/null || true
+    fi
+  else
+    # Try to install nftables
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y nftables >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y nftables >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y nftables >/dev/null 2>&1
+    fi
+    if command -v nft >/dev/null 2>&1; then
+      nft add table inet incus_block 2>/dev/null || true
+      nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+      for port in "${blocked_ports[@]}"; do
+        nft add rule inet incus_block forward oifname "$iface" tcp dport "$port" drop 2>/dev/null || true
+        nft add rule inet incus_block forward oifname "$iface" udp dport "$port" drop 2>/dev/null || true
+      done
+      # Only save our own tables, not incusd's managed 'incus' table
+      { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable nftables 2>/dev/null || true
+      fi
+    else
+      # Final fallback: iptables with persistence
+      for port in "${blocked_ports[@]}"; do
+        iptables --ipv4 -I FORWARD -o "$iface" -p tcp --dport "${port}" -j DROP 2>/dev/null || true
+        iptables --ipv4 -I FORWARD -o "$iface" -p udp --dport "${port}" -j DROP 2>/dev/null || true
+      done
+      if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+      fi
+      if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save 2>/dev/null || true
+      fi
+      if command -v iptables-save >/dev/null 2>&1; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+      fi
+    fi
+  fi
 }
 
 download_scripts() {

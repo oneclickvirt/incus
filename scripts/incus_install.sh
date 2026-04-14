@@ -952,7 +952,7 @@ init_storage_backend() {
     _green "尝试使用 $backend 类型，存储池大小为 $disk_nums"
     _green "Trying to use $backend type with storage pool size $disk_nums"
     local need_reboot=false
-    if [ "$backend" = "btrfs" ] && ! is_storage_installed "btrfs" ] && ! command -v btrfs >/dev/null; then
+    if [ "$backend" = "btrfs" ] && ! is_storage_installed "btrfs" && ! command -v btrfs >/dev/null; then
         _yellow "正在安装 btrfs-progs..."
         _yellow "Installing btrfs-progs..."
         $PACKAGETYPE_INSTALL btrfs-progs
@@ -962,7 +962,7 @@ init_storage_backend() {
         _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
         echo "$backend" >/usr/local/bin/incus_reboot
         need_reboot=true
-    elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" ] && ! command -v lvm >/dev/null; then
+    elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" && ! command -v lvm >/dev/null; then
         _yellow "正在安装 lvm2..."
         _yellow "Installing lvm2..."
         $PACKAGETYPE_INSTALL lvm2
@@ -972,7 +972,7 @@ init_storage_backend() {
         _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
         echo "$backend" >/usr/local/bin/incus_reboot
         need_reboot=true
-    elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" ] && ! command -v zfs >/dev/null; then
+    elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" && ! command -v zfs >/dev/null; then
         _yellow "正在安装 zfsutils-linux..."
         _yellow "Installing zfsutils-linux..."
         $PACKAGETYPE_INSTALL zfsutils-linux
@@ -982,17 +982,17 @@ init_storage_backend() {
         _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
         echo "$backend" >/usr/local/bin/incus_reboot
         need_reboot=true
-    elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" ] && ! command -v ceph >/dev/null; then
+    elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" && ! command -v ceph >/dev/null; then
         _yellow "正在安装 ceph-common..."
         _yellow "Installing ceph-common..."
         $PACKAGETYPE_INSTALL ceph-common
         record_installed_storage "ceph"
     fi
-    if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" ] && ! grep -q btrfs /proc/filesystems; then
+    if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" && ! grep -q btrfs /proc/filesystems; then
         modprobe btrfs || true
-    elif [ "$backend" = "lvm" ] && is_storage_installed "lvm" ] && ! grep -q dm-mod /proc/modules; then
+    elif [ "$backend" = "lvm" ] && is_storage_installed "lvm" && ! grep -q dm-mod /proc/modules; then
         modprobe dm-mod || true
-    elif [ "$backend" = "zfs" ] && is_storage_installed "zfs" ] && ! grep -q zfs /proc/filesystems; then
+    elif [ "$backend" = "zfs" ] && is_storage_installed "zfs" && ! grep -q zfs /proc/filesystems; then
         modprobe zfs || true
     fi
     if [ "$need_reboot" = true ]; then
@@ -1374,31 +1374,74 @@ install_dns_checker() {
     fi
 }
 
+ensure_nftables() {
+    if command -v nft >/dev/null 2>&1; then
+        return 0
+    fi
+    $PACKAGETYPE_INSTALL nftables >/dev/null 2>&1 || true
+    if command -v nft >/dev/null 2>&1; then
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable nftables 2>/dev/null || true
+            systemctl start nftables 2>/dev/null || true
+        fi
+        return 0
+    fi
+    return 1
+}
+
+ensure_iptables_persistent() {
+    if command -v apt >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+    fi
+}
+
+save_firewall_rules() {
+    if command -v nft >/dev/null 2>&1; then
+        # Only save our own custom tables, NOT incusd's managed 'incus' table.
+        # Saving 'nft list ruleset' would include incusd's transient tables which
+        # reference interfaces (incusbr0) that don't exist at nftables.service
+        # start time, causing firewall/SSH breakage on reboot.
+        {
+            nft list table inet incus_masq 2>/dev/null || true
+            nft list table inet incus_block 2>/dev/null || true
+        } > /etc/nftables.conf
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable nftables 2>/dev/null || true
+        fi
+    else
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save 2>/dev/null || true
+        fi
+        if command -v iptables-save >/dev/null 2>&1; then
+            mkdir -p /etc/iptables
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+        fi
+    fi
+}
+
 setup_iptables() {
     if command -v ufw >/dev/null 2>&1; then
         ufw allow in on incusbr0
         ufw route allow in on incusbr0
         ufw route allow out on incusbr0
     fi
-    if command -v apt >/dev/null 2>&1; then
-        install_package iptables
-        install_package iptables-persistent || true
-        iptables -t nat -A POSTROUTING -j MASQUERADE
-        netfilter-persistent save || true
+    if ensure_nftables; then
+        # Use nftables for MASQUERADE (handles both IPv4 and IPv6)
+        nft add table inet incus_masq 2>/dev/null || true
+        nft add chain inet incus_masq postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+        nft add rule inet incus_masq postrouting oifname != "incusbr0" masquerade 2>/dev/null || true
+        save_firewall_rules
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --zone=public --add-masquerade
         firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
         firewall-cmd --reload
     else
-        # Fallback for systems without iptables-persistent or firewall-cmd (e.g., Alpine Linux)
-        echo "Note: Using basic iptables rules (no persistence tool found)"
-        if command -v iptables >/dev/null 2>&1; then
-            iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
-            # Try to save rules if rc-update is available (Alpine/OpenRC)
-            if command -v rc-update >/dev/null 2>&1; then
-                /etc/init.d/iptables save 2>/dev/null || true
-            fi
-        fi
+        # Fallback to iptables with persistence
+        install_package iptables
+        ensure_iptables_persistent
+        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
+        save_firewall_rules
     fi
 }
 
