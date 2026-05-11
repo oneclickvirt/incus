@@ -255,63 +255,91 @@ install_rdisc6() {
 get_real_ipv6_prefixlen_from_router() {
     local interface="$1"
     local current_prefixlen="$2"
-    
-    if [ ! -f /usr/local/bin/incus_ipv6_real_prefixlen ]; then
-        if command -v rdisc6 >/dev/null 2>&1; then
-            _blue "Attempting to get real IPv6 prefix from router advertisement..."
-            _green "尝试从路由器通告中获取真实的 IPv6 前缀..."
-            _blue "Using network interface: ${interface}"
-            _green "正在使用网络接口: ${interface}"
-            
-            local rdisc6_output
-            rdisc6_output=$(timeout 10 rdisc6 "${interface}" 2>/dev/null)
-            
-            if [ -n "$rdisc6_output" ]; then
-                # 从路由器通告中提取前缀长度
-                local real_prefixlen
-                if [ "$GREP_PERL_SUPPORT" = true ]; then
-                    # 如果支持 Perl 正则，使用 grep -oP（更精确）
-                    real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | grep -oP '[:：]\s*[0-9a-fA-F:]+/\K\d+' | head -n 1)
-                else
-                    # 否则使用兼容的 sed 方式，避免 Perl 正则表达式依赖
-                    real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | sed -n 's/.*[：:][[:space:]]*\([0-9a-fA-F:]*\)\/\([0-9]\+\).*/\2/p' | head -n 1)
+
+    # 首先检查是否有有效的缓存值（必须是 1-128 之间的整数）
+    if [ -f /usr/local/bin/incus_ipv6_real_prefixlen ]; then
+        local cached_val
+        cached_val=$(tr -d '[:space:]' < /usr/local/bin/incus_ipv6_real_prefixlen 2>/dev/null)
+        if [[ "$cached_val" =~ ^[0-9]+$ ]] && [ "$cached_val" -ge 1 ] && [ "$cached_val" -le 128 ]; then
+            echo "$cached_val"
+            return 0
+        else
+            _yellow "Cached IPv6 prefix length '$cached_val' is invalid (must be 1-128), re-detecting..."
+            _yellow "缓存的 IPv6 前缀长度 '$cached_val' 无效（需为 1-128），重新检测..."
+            rm -f /usr/local/bin/incus_ipv6_real_prefixlen
+        fi
+    fi
+
+    # 缓存无效或不存在，尝试从路由器通告获取
+    if command -v rdisc6 >/dev/null 2>&1; then
+        _blue "Attempting to get real IPv6 prefix from router advertisement..."
+        _green "尝试从路由器通告中获取真实的 IPv6 前缀..."
+        _blue "Using network interface: ${interface}"
+        _green "正在使用网络接口: ${interface}"
+
+        local rdisc6_output
+        rdisc6_output=$(timeout 10 rdisc6 "${interface}" 2>/dev/null)
+
+        if [ -n "$rdisc6_output" ]; then
+            # 从路由器通告中提取前缀长度
+            local real_prefixlen
+            if [ "$GREP_PERL_SUPPORT" = true ]; then
+                # 如果支持 Perl 正则，使用 grep -oP（更精确）
+                real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | grep -oP '[:：]\s*[0-9a-fA-F:]+/\K\d+' | head -n 1)
+            else
+                # 否则使用兼容的 sed 方式，避免 Perl 正则表达式依赖
+                real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | sed -n 's/.*[：:][[:space:]]*\([0-9a-fA-F:]*\)\/\([0-9]\+\).*/\2/p' | head -n 1)
+            fi
+
+            # 验证路由器通告的前缀长度必须在 1-128 之间
+            if [[ "$real_prefixlen" =~ ^[0-9]+$ ]] && [ "$real_prefixlen" -ge 1 ] && [ "$real_prefixlen" -le 128 ]; then
+                _green "Found real IPv6 prefix length from router advertisement: /$real_prefixlen"
+                _green "从路由器通告中发现真实的 IPv6 前缀长度: /$real_prefixlen"
+
+                if [ -z "$current_prefixlen" ]; then
+                    # 当前无前缀，直接使用路由器通告值
+                    echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
+                    echo "$real_prefixlen"
+                    return 0
                 fi
-                
-                if [ -n "$real_prefixlen" ] && [ "$real_prefixlen" -gt 0 ] && [ "$real_prefixlen" -le 128 ]; then
-                    _green "Found real IPv6 prefix length from router advertisement: /$real_prefixlen"
-                    _green "从路由器通告中发现真实的 IPv6 前缀长度: /$real_prefixlen"
-                    
-                    # 比较当前前缀长度和路由器通告的前缀长度
-                    if [ -n "$current_prefixlen" ] && [ "$current_prefixlen" -lt "$real_prefixlen" ]; then
-                        _yellow "Warning: Current interface prefix /$current_prefixlen is smaller than router advertised /$real_prefixlen"
-                        _yellow "警告: 当前接口前缀 /$current_prefixlen 小于路由器通告的 /$real_prefixlen"
-                        _blue "Using the larger prefix /$real_prefixlen from router advertisement"
-                        _green "将使用路由器通告的更大前缀 /$real_prefixlen"
-                        echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
-                        echo "$real_prefixlen"
-                        return 0
-                    elif [ -z "$current_prefixlen" ]; then
-                        echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
-                        echo "$real_prefixlen"
-                        return 0
-                    fi
-                else
-                    _yellow "Could not parse IPv6 prefix length from router advertisement"
-                    _yellow "无法从路由器通告中解析 IPv6 前缀长度"
+
+                # 规则1: OS 报告的前缀比路由器更宽泛（数字更小），使用路由器更精确的前缀
+                #        例如 OS=/48, 路由器=/64 → 使用 /64（更符合实际分配的子网）
+                if [ "$current_prefixlen" -lt "$real_prefixlen" ]; then
+                    _green "Using more specific prefix /$real_prefixlen from router advertisement (OS reported /$current_prefixlen)"
+                    _green "使用路由器通告的更精确前缀 /$real_prefixlen（OS 报告为 /$current_prefixlen）"
+                    echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
+                    echo "$real_prefixlen"
+                    return 0
+                fi
+
+                # 规则2: OS 报告的前缀过于精确（如 /128 主机路由），而路由器通告的是可用子网（≤64）
+                #        这种情况发生在 SLAAC 或 DHCPv6 给宿主机分配了 /128，但实际子网是 /64
+                if [ "$current_prefixlen" -gt 64 ] && [ "$real_prefixlen" -le 64 ]; then
+                    _yellow "Current prefix /$current_prefixlen is a host route; using router-advertised subnet /$real_prefixlen"
+                    _yellow "当前前缀 /$current_prefixlen 为主机路由，使用路由器通告的子网 /$real_prefixlen"
+                    echo "$real_prefixlen" >/usr/local/bin/incus_ipv6_real_prefixlen
+                    echo "$real_prefixlen"
+                    return 0
                 fi
             else
-                _yellow "Could not get router advertisement response on interface ${interface} (timeout or no response)"
-                _yellow "无法在接口 ${interface} 获取路由器通告响应(超时或无响应)"
+                _yellow "Could not parse valid IPv6 prefix length from router advertisement (got: '$real_prefixlen')"
+                _yellow "无法从路由器通告中解析有效的 IPv6 前缀长度（获取到: '$real_prefixlen'）"
             fi
+        else
+            _yellow "Could not get router advertisement response on interface ${interface} (timeout or no response)"
+            _yellow "无法在接口 ${interface} 获取路由器通告响应(超时或无响应)"
         fi
-    else
-        # 如果已经有缓存的真实前缀长度，直接返回
-        cat /usr/local/bin/incus_ipv6_real_prefixlen
-        return 0
     fi
-    
-    # 如果无法从路由器获取，返回当前前缀长度
-    echo "$current_prefixlen"
+
+    # 如果无法从路由器获取，返回当前前缀长度（需确保也在有效范围内）
+    if [[ "$current_prefixlen" =~ ^[0-9]+$ ]] && [ "$current_prefixlen" -ge 1 ] && [ "$current_prefixlen" -le 128 ]; then
+        echo "$current_prefixlen"
+    else
+        _yellow "Current prefix '$current_prefixlen' also invalid, defaulting to 64"
+        _yellow "当前前缀 '$current_prefixlen' 也无效，默认使用 64"
+        echo "64"
+    fi
     return 1
 }
 
@@ -642,7 +670,12 @@ setup_network_device_ipv6() {
     IPV6=$(cat /usr/local/bin/incus_check_ipv6)
     if ip -f inet6 addr | grep -q "he-ipv6"; then
         ipv6_network_name="he-ipv6"
-        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | safe_grep "${IPV6}/24|${IPV6}/48|${IPV6}/64|${IPV6}/80|${IPV6}/96|${IPV6}/112" | grep global | awk '{print $2}' 2>/dev/null)
+        # 使用通用前缀模式匹配任意有效的 IPv6 前缀长度（1-128），而非仅匹配特定值
+        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | grep -E "^${IPV6}/[0-9]+" | head -n 1 2>/dev/null)
+        if [ -z "$ip_network_gam" ]; then
+            # 如果精确匹配失败，回退到宿主机上该接口的第一个全局地址
+            ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
+        fi
     else
         ipv6_network_name=$(ls /sys/class/net/ | grep -v "$(ls /sys/devices/virtual/net/)")
         ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
@@ -658,6 +691,15 @@ setup_network_device_ipv6() {
             ip_network_gam="${ipv6_addr_only}/${real_prefixlen}"
             _green "Updated IPv6 address with real prefix from router: $ip_network_gam"
             _green "使用从路由器获取的真实前缀更新 IPv6 地址: $ip_network_gam"
+        fi
+        # 最终安全校验：前缀长度必须在 1-128 之间
+        local validated_plen
+        validated_plen=$(echo "$ip_network_gam" | cut -d'/' -f2)
+        if ! [[ "$validated_plen" =~ ^[0-9]+$ ]] || [ "$validated_plen" -lt 1 ] || [ "$validated_plen" -gt 128 ]; then
+            _yellow "Warning: prefix length '$validated_plen' in '$ip_network_gam' is invalid, resetting to 64"
+            _yellow "警告: '$ip_network_gam' 中的前缀长度 '$validated_plen' 无效，重置为 64"
+            ipv6_addr_only=$(echo "$ip_network_gam" | cut -d'/' -f1)
+            ip_network_gam="${ipv6_addr_only}/64"
         fi
     fi
     if [ -n "$ip_network_gam" ]; then
@@ -752,6 +794,12 @@ setup_iptables_ipv6() {
         _red "无可用 IPV6 地址，不进行自动映射"
         exit 1
     fi
+    # 使用前再次校验前缀长度，确保不超过 128
+    if ! [[ "$ipv6_length" =~ ^[0-9]+$ ]] || [ "$ipv6_length" -lt 1 ] || [ "$ipv6_length" -gt 128 ]; then
+        _yellow "Warning: IPv6 prefix length '$ipv6_length' invalid in setup_iptables_ipv6, defaulting to 64"
+        _yellow "警告: setup_iptables_ipv6 中 IPv6 前缀长度 '$ipv6_length' 无效，默认使用 64"
+        ipv6_length=64
+    fi
     ip addr add "$IPV6"/"$ipv6_length" dev "$interface"
     if [ "$use_nft" = true ]; then
         # Use nftables for IPv6 DNAT (handles v6 natively)
@@ -838,6 +886,12 @@ main() {
             ipv6_length="$real_ipv6_length"
             ipv6_addr_only=$(echo "$ipv6_address" | cut -d'/' -f1)
             ipv6_address="${ipv6_addr_only}/${ipv6_length}"
+        fi
+        # 最终安全校验: 前缀长度必须在 1-128 之间，防止任何异常值导致后续 ip addr add 失败
+        if ! [[ "$ipv6_length" =~ ^[0-9]+$ ]] || [ "$ipv6_length" -lt 1 ] || [ "$ipv6_length" -gt 128 ]; then
+            _yellow "Warning: IPv6 prefix length '$ipv6_length' is out of valid range [1,128], defaulting to 64"
+            _yellow "警告: IPv6 前缀长度 '$ipv6_length' 超出有效范围 [1,128]，默认使用 64"
+            ipv6_length=64
         fi
         _green "subnet size: $ipv6_length"
         _green "子网大小: $ipv6_length"

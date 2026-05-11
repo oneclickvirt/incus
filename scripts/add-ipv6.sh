@@ -22,6 +22,29 @@ if [ -z "$interface" ]; then
     exit 1
 fi
 
+# 从宿主机接口检测实际的 IPv6 前缀长度，避免硬编码 /64
+# Detect the actual IPv6 prefix length from the host interface to avoid hardcoding /64
+get_host_ipv6_prefixlen() {
+    local iface="$1"
+    local plen
+    # 优先读取缓存的真实前缀（由 build_ipv6_network.sh 写入）
+    if [ -f /usr/local/bin/incus_ipv6_real_prefixlen ]; then
+        plen=$(tr -d '[:space:]' < /usr/local/bin/incus_ipv6_real_prefixlen 2>/dev/null)
+        if [[ "$plen" =~ ^[0-9]+$ ]] && [ "$plen" -ge 1 ] && [ "$plen" -le 128 ]; then
+            echo "$plen"
+            return
+        fi
+    fi
+    # 回退：从接口读取第一个全局 IPv6 地址的前缀
+    plen=$(ip -6 addr show dev "$iface" 2>/dev/null | awk '/inet6.*scope global/ {print $2}' | head -1 | cut -d'/' -f2)
+    if [[ "$plen" =~ ^[0-9]+$ ]] && [ "$plen" -ge 1 ] && [ "$plen" -le 128 ]; then
+        echo "$plen"
+    else
+        echo "64"
+    fi
+}
+host_prefixlen=$(get_host_ipv6_prefixlen "$interface")
+
 # Primary: restore from iptables rules.v6 (original method)
 file="/etc/iptables/rules.v6"
 if [ -f "$file" ]; then
@@ -37,7 +60,7 @@ if [ -f "$file" ]; then
     if [ ${#array[@]} -gt 0 ]; then
         for parameter in "${array[@]}"; do
             if ! ip -6 addr show dev "$interface" | grep -qw "$parameter"; then
-                ip addr add "$parameter"/64 dev "$interface" 2>/dev/null || true
+                ip addr add "$parameter"/"$host_prefixlen" dev "$interface" 2>/dev/null || true
             fi
         done
         # Restore ip6tables rules
@@ -61,7 +84,7 @@ if command -v nft >/dev/null 2>&1 && [ -f /etc/nftables.conf ]; then
     nft_ipv6_addrs=$(grep -oE 'ip6 daddr [0-9a-fA-F:]+' /etc/nftables.conf 2>/dev/null | awk '{print $3}')
     for addr in $nft_ipv6_addrs; do
         if ! ip -6 addr show dev "$interface" | grep -qw "$addr"; then
-            ip addr add "${addr}/64" dev "$interface" 2>/dev/null || true
+            ip addr add "${addr}/${host_prefixlen}" dev "$interface" 2>/dev/null || true
         fi
     done
     nft -f /etc/nftables.conf 2>/dev/null || true
