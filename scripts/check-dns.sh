@@ -154,6 +154,10 @@ backup_file() {
     local file=$1
     local backup_suffix=".bak.original"
     local backup_file="${file}${backup_suffix}"
+    if [ ! -f "$file" ]; then
+        mkdir -p "$(dirname "$file")"
+        touch "$file"
+    fi
     if [ ! -f "$backup_file" ]; then
         echo "备份 $file 到 $backup_file"
         cp "$file" "$backup_file"
@@ -222,6 +226,10 @@ configure_systemd_resolved() {
     local need_ipv6=$2
     
     echo "配置 systemd-resolved..."
+    mkdir -p "$(dirname "$RESOLVED_CONF")"
+    if [ ! -f "$RESOLVED_CONF" ]; then
+        printf "[Resolve]\n" >"$RESOLVED_CONF"
+    fi
     
     # 备份配置文件
     backup_file "$RESOLVED_CONF"
@@ -245,12 +253,16 @@ configure_systemd_resolved() {
     if grep -q "^DNS=" "$RESOLVED_CONF"; then
         current_dns=$(grep "^DNS=" "$RESOLVED_CONF" | cut -d'=' -f2)
     fi
+    local current_fallback_dns=""
+    if grep -q "^FallbackDNS=" "$RESOLVED_CONF"; then
+        current_fallback_dns=$(grep "^FallbackDNS=" "$RESOLVED_CONF" | cut -d'=' -f2)
+    fi
     
     local new_dns=$(join " " "${dns_list[@]}")
     local new_fallback_dns=$(join " " "${fallback_dns_list[@]}")
     
     # 如果当前配置与新配置相同，跳过
-    if [ "$current_dns" = "$new_dns" ]; then
+    if [ "$current_dns" = "$new_dns" ] && [ "$current_fallback_dns" = "$new_fallback_dns" ]; then
         echo "systemd-resolved DNS 配置已是最新，无需修改"
         return 0
     fi
@@ -258,6 +270,7 @@ configure_systemd_resolved() {
     # 创建临时文件进行配置更新
     local temp_file=$(mktemp)
     local updated=false
+    local fallback_updated=false
     
     # 读取原配置文件并更新
     while IFS= read -r line; do
@@ -268,10 +281,14 @@ configure_systemd_resolved() {
             fi
         elif [[ "$line" =~ ^#?FallbackDNS= ]]; then
             echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+            fallback_updated=true
         else
             echo "$line" >> "$temp_file"
         fi
     done < "$RESOLVED_CONF"
+    if $updated && ! $fallback_updated; then
+        echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+    fi
     
     # 如果没有找到 DNS= 行，添加到 [Resolve] 段落下
     if ! $updated; then
@@ -299,6 +316,15 @@ configure_systemd_resolved() {
         if $in_resolve_section && ! $dns_added; then
             echo "DNS=$new_dns" >> "$temp_file"
             echo "FallbackDNS=$new_fallback_dns" >> "$temp_file"
+            dns_added=true
+        fi
+        if ! $dns_added; then
+            {
+                echo ""
+                echo "[Resolve]"
+                echo "DNS=$new_dns"
+                echo "FallbackDNS=$new_fallback_dns"
+            } >> "$temp_file"
         fi
     fi
     

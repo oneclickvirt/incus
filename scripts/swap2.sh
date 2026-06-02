@@ -9,6 +9,27 @@ Green="\033[32m"
 Font="\033[0m"
 Red="\033[31m"
 
+default_swap_size() {
+    local mem_mb
+    mem_mb=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)
+    if [[ "$mem_mb" =~ ^[1-9][0-9]*$ ]]; then
+        echo $((mem_mb * 2))
+    else
+        echo 1024
+    fi
+}
+
+validate_swap_size() {
+    if [ -z "$swapsize" ]; then
+        swapsize="${SWAP_SIZE:-$(default_swap_size)}"
+    fi
+    if ! [[ "$swapsize" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${Red}Invalid swap size, please use a positive integer in MB.${Font}"
+        echo -e "${Red}swap 大小无效，请使用 MB 为单位的正整数。${Font}"
+        exit 1
+    fi
+}
+
 #root权限
 root_need() {
     if [[ $EUID -ne 0 ]]; then
@@ -34,7 +55,8 @@ add_swap() {
     #如果不存在将为其创建swap
     if [ $? -ne 0 ]; then
         echo -e "${Green}swapfile未发现，正在为其创建swapfile${Font}"
-        fallocate -l ${swapsize}M /swapfile
+        validate_swap_size
+        fallocate -l "${swapsize}M" /swapfile
         chmod 600 /swapfile
         mkswap /swapfile
         swapon /swapfile

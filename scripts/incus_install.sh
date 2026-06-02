@@ -4,8 +4,11 @@
 #
 # 支持以下环境变量实现一键非交互式安装 / Supported env vars for non-interactive one-click install:
 #
-#   INCUS_NONINTERACTIVE=true   跳过所有交互提示，使用默认值或其他环境变量值
+#   noninteractive=true         跳过所有交互提示，使用默认值或其他环境变量值
 #                               Skip all interactive prompts; use defaults or other env var values
+#
+#   INCUS_NONINTERACTIVE=true   兼容旧版非交互变量
+#                               Backward-compatible non-interactive flag
 #
 #   INCUS_STORAGE_PATH=<path>   自定义存储池路径，如 /data/incus-storage（留空则使用系统默认）
 #                               Custom storage pool path, e.g. /data/incus-storage (empty = system default)
@@ -17,8 +20,9 @@
 #                               Skip CDN acceleration, connect to GitHub directly
 #
 # 示例 / Example:
-#   INCUS_NONINTERACTIVE=true INCUS_DISK_SIZE=50 bash incus_install.sh
-#   INCUS_NONINTERACTIVE=true INCUS_STORAGE_PATH=/data/incus-storage INCUS_DISK_SIZE=80 bash incus_install.sh
+#   export noninteractive=true
+#   INCUS_DISK_SIZE=50 bash incus_install.sh
+#   INCUS_STORAGE_PATH=/data/incus-storage INCUS_DISK_SIZE=80 bash incus_install.sh
 
 cd /root >/dev/null 2>&1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
@@ -103,6 +107,16 @@ _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
+
+is_noninteractive() {
+    case "${noninteractive:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    case "${INCUS_NONINTERACTIVE:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    return 1
+}
 
 # 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
 # 在混合环境中会尝试多个命令以确保操作成功
@@ -452,7 +466,7 @@ rebuild_cloud_init() {
 install_via_zabbly() {
     echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
     mkdir -p /etc/apt/keyrings/
-    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --dearmor -o /etc/apt/keyrings/zabbly.gpg
+    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --batch --yes --dearmor -o /etc/apt/keyrings/zabbly.gpg
     cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
@@ -514,7 +528,7 @@ install_incus() {
         elif [ -f /etc/gentoo-release ]; then
             echo "检测到 Gentoo | Detected Gentoo"
             echo "使用 emerge 安装 incus | Installing incus using emerge"
-            emerge -av app-containers/incus
+            emerge -v app-containers/incus
         elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ] || [ -f /etc/almalinux-release ] || [ -f /etc/rockylinux-release ]; then
             echo "检测到 RPM 系统 | Detected RPM-based system"
             echo "安装 epel-release，并启用 COPR 仓库及 CodeReady Builder (CRB) | Installing epel-release, enabling COPR repository and CodeReady Builder (CRB)"
@@ -1187,12 +1201,9 @@ setup_storage() {
 }
 
 get_user_inputs() {
-    # 兼容旧版 noninteractive 变量，同时支持新的 INCUS_NONINTERACTIVE 环境变量
-    local _noninteractive="${INCUS_NONINTERACTIVE:-${noninteractive:-false}}"
-
     # ---- storage_path ----
     # 优先使用 INCUS_STORAGE_PATH 环境变量（即使值为空也视为"已指定，不使用自定义路径"）
-    if [[ -v INCUS_STORAGE_PATH ]]; then
+    if [ "${INCUS_STORAGE_PATH+x}" = "x" ]; then
         storage_path="${INCUS_STORAGE_PATH}"
         if [ -n "$storage_path" ]; then
             if [ ! -d "$storage_path" ]; then
@@ -1203,7 +1214,7 @@ get_user_inputs() {
             fi
             [ -n "$storage_path" ] && _green "使用环境变量指定的存储路径 / Using storage path from env: $storage_path"
         fi
-    elif [ "$_noninteractive" = "true" ]; then
+    elif is_noninteractive; then
         storage_path=""
     else
         while true; do
@@ -1250,9 +1261,13 @@ get_user_inputs() {
     if [[ "${INCUS_DISK_SIZE:-}" =~ ^[1-9][0-9]*$ ]]; then
         disk_nums="$INCUS_DISK_SIZE"
         _green "使用环境变量指定的存储池大小 / Using disk size from env: ${disk_nums}GB"
-    elif [ "$_noninteractive" = "true" ]; then
+    elif is_noninteractive; then
         available_space=$(get_available_space)
         disk_nums=$((available_space - 1))
+        if [ "$disk_nums" -lt 1 ]; then
+            disk_nums=1
+        fi
+        _green "非交互模式使用默认存储池大小 / Non-interactive disk size: ${disk_nums}GB"
     else
         while true; do
             _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the storage pool reaches 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
@@ -1507,11 +1522,16 @@ main() {
     install_dns_checker
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
-    _green "You must reboot the machine to ensure user permissions are properly loaded. (The machine will restart automatically after 15 seconds)"
     _green "The first startup may take 400~500 seconds at most, please be patient."
-    _green "必须重启本机以保证用户权限正确加载。(15秒后本机将自动重启)"
     _green "首次启动最多可能耗时在400~500秒，请耐心等待"
-    sleep 15 && reboot
+    if is_noninteractive; then
+        _green "检测到 noninteractive=true，跳过自动重启。"
+        _green "Detected noninteractive=true, skipping automatic reboot."
+    else
+        _green "You must reboot the machine to ensure user permissions are properly loaded. (The machine will restart automatically after 15 seconds)"
+        _green "必须重启本机以保证用户权限正确加载。(15秒后本机将自动重启)"
+        sleep 15 && reboot
+    fi
 }
 
 main

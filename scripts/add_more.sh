@@ -9,6 +9,24 @@ green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 reading() { read -rp "$(green "$1")" "$2"; }
+
+is_noninteractive() {
+    case "${noninteractive:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    case "${INCUS_NONINTERACTIVE:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    return 1
+}
+
+is_positive_int() {
+    [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_positive_number() {
+    [[ "$1" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]]
+}
 utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
 if [[ -z "$utf8_locale" ]]; then
     yellow "No UTF-8 locale found"
@@ -127,68 +145,84 @@ check_log() {
 }
 
 build_new_containers() {
-    while true; do
-        green "How many more containers need to be generated? (Enter how many new containers to add):"
-        reading "还需要生成几个容器？(输入新增几个容器)：" new_nums
-        if [[ "$new_nums" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive integer."
-            yellow "输入无效，请输入一个正整数。"
+    if is_noninteractive; then
+        new_nums="${INCUS_ADD_NUMS:-1}"
+        cpu_nums="${INCUS_ADD_CPU:-1}"
+        memory_nums="${INCUS_ADD_MEMORY:-256}"
+        disk_nums="${INCUS_ADD_DISK:-1}"
+        input_nums="${INCUS_ADD_DOWNLOAD:-300}"
+        output_nums="${INCUS_ADD_UPLOAD:-300}"
+        is_enabled_ipv6="${INCUS_ADD_IPV6:-N}"
+        system="${INCUS_ADD_SYSTEM:-debian11}"
+        if ! is_positive_int "$new_nums" || ! is_positive_int "$cpu_nums" || ! is_positive_int "$memory_nums" || ! is_positive_int "$input_nums" || ! is_positive_int "$output_nums" || ! is_positive_number "$disk_nums"; then
+            yellow "Invalid non-interactive values. Please check INCUS_ADD_NUMS/CPU/MEMORY/DISK/DOWNLOAD/UPLOAD."
+            yellow "非交互参数无效，请检查 INCUS_ADD_NUMS/CPU/MEMORY/DISK/DOWNLOAD/UPLOAD。"
+            exit 1
         fi
-    done
-    while true; do
-        green "How many Cores are allocated per container? (Number of CPU cores per container, if you need 1 core, enter 1):"
-        reading "每个容器分配几个CPU？(每个容器CPU核数，若需要1核，输入1)：" cpu_nums
-        if [[ "$cpu_nums" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive integer."
-            yellow "输入无效，请输入一个正整数。"
-        fi
-    done
-    while true; do
-        green "How much memory is allocated per container? (Memory size per container, enter 256 if 256MB of memory is required):"
-        reading "每个容器分配多少内存？(每个容器内存大小，若需要256MB内存，输入256)：" memory_nums
-        if [[ "$memory_nums" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive integer."
-            yellow "输入无效，请输入一个正整数。"
-        fi
-    done
-    while true; do
-        green "What size hard disk is allocated for each container? (per container hard drive size, enter 1 if 1G hard drive is required):"
-        reading "每个容器分配多大硬盘？(每个容器硬盘大小，若需要1G硬盘，输入1)：" disk_nums
-        if [[ "$disk_nums" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive num."
-            yellow "输入无效，请输入一个正数。"
-        fi
-    done
-    while true; do
-        green "What is the download speed limit per container? (If you need the limit to be 300Mbit, enter 300):"
-        reading "每个容器下载速度限制多少？(若需要限制为300Mbit，输入300)：" input_nums
-        if [[ "$input_nums" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive integer."
-            yellow "输入无效，请输入一个正整数。"
-        fi
-    done
-    while true; do
-        green "What is the upload speed limit per container? (If you need the limit to be 300Mbit, enter 300):"
-        reading "每个容器上传速度限制多少？(若需要限制为300Mbit，输入300)：" output_nums
-        if [[ "$output_nums" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            yellow "Invalid input, please enter a positive integer."
-            yellow "输入无效，请输入一个正整数。"
-        fi
-    done
-    green "Is IPV6 enabled for each chick?(Leave blank N by default, no V6 address is set):"
-    reading "每个容器是否启用IPV6？(默认留空为N，不设置V6地址)：" is_enabled_ipv6
+    else
+        while true; do
+            green "How many more containers need to be generated? (Enter how many new containers to add):"
+            reading "还需要生成几个容器？(输入新增几个容器)：" new_nums
+            if is_positive_int "$new_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive integer."
+                yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        while true; do
+            green "How many Cores are allocated per container? (Number of CPU cores per container, if you need 1 core, enter 1):"
+            reading "每个容器分配几个CPU？(每个容器CPU核数，若需要1核，输入1)：" cpu_nums
+            if is_positive_int "$cpu_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive integer."
+                yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        while true; do
+            green "How much memory is allocated per container? (Memory size per container, enter 256 if 256MB of memory is required):"
+            reading "每个容器分配多少内存？(每个容器内存大小，若需要256MB内存，输入256)：" memory_nums
+            if is_positive_int "$memory_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive integer."
+                yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        while true; do
+            green "What size hard disk is allocated for each container? (per container hard drive size, enter 1 if 1G hard drive is required):"
+            reading "每个容器分配多大硬盘？(每个容器硬盘大小，若需要1G硬盘，输入1)：" disk_nums
+            if is_positive_number "$disk_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive num."
+                yellow "输入无效，请输入一个正数。"
+            fi
+        done
+        while true; do
+            green "What is the download speed limit per container? (If you need the limit to be 300Mbit, enter 300):"
+            reading "每个容器下载速度限制多少？(若需要限制为300Mbit，输入300)：" input_nums
+            if is_positive_int "$input_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive integer."
+                yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        while true; do
+            green "What is the upload speed limit per container? (If you need the limit to be 300Mbit, enter 300):"
+            reading "每个容器上传速度限制多少？(若需要限制为300Mbit，输入300)：" output_nums
+            if is_positive_int "$output_nums"; then
+                break
+            else
+                yellow "Invalid input, please enter a positive integer."
+                yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        green "Is IPV6 enabled for each chick?(Leave blank N by default, no V6 address is set):"
+        reading "每个容器是否启用IPV6？(默认留空为N，不设置V6地址)：" is_enabled_ipv6
+    fi
     sys_bit=""
     sysarch="$(uname -m)"
     case "${sysarch}" in
@@ -201,8 +235,10 @@ build_new_containers() {
     *) sys_bit="x86_64" ;;
     esac
     while true; do
-        green "What is the system of each container? (Note that the incoming parameter is the system name + version number, e.g. debian11, ubuntu20, centos7):"
-        reading "每个容器的系统是什么？(注意传入参数为系统名字+版本号，如：debian11、ubuntu20、centos7)：" system
+        if ! is_noninteractive; then
+            green "What is the system of each container? (Note that the incoming parameter is the system name + version number, e.g. debian11, ubuntu20, centos7):"
+            reading "每个容器的系统是什么？(注意传入参数为系统名字+版本号，如：debian11、ubuntu20、centos7)：" system
+        fi
         a="${system%%[0-9]*}"
         b="${system##*[!0-9.]}"
         output=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
@@ -218,6 +254,9 @@ build_new_containers() {
             echo "incus image list images:系统名字/版本号"
             echo "查询是否存在对应镜像"
             yellow "输入无效，请输入一个存在的系统"
+            if is_noninteractive; then
+                exit 1
+            fi
         fi
     done
     if [[ -n "$is_enabled_ipv6" && ("$is_enabled_ipv6" == "Y" || "$is_enabled_ipv6" == "y") ]]; then
@@ -231,9 +270,9 @@ build_new_containers() {
         ssh_port=$(($ssh_port + 1))
         public_port_start=$(($public_port_end + 1))
         public_port_end=$(($public_port_start + 24))
-        ./buildct.sh $container_name $cpu_nums $memory_nums $disk_nums $ssh_port $public_port_start $public_port_end $input_nums $output_nums $status_ipv6 $system
+        ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system"
         cat "$container_name" >>log
-        rm -rf $container_name
+        rm -rf "$container_name"
     done
 }
 

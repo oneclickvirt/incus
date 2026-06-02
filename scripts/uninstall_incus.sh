@@ -5,14 +5,30 @@
 #
 # 支持以下环境变量实现一键非交互式卸载 / Supported env vars for non-interactive one-click uninstall:
 #
-#   INCUS_FORCE_UNINSTALL=true   跳过确认提示，直接执行卸载（用于自动化/脚本调用）
-#                                Skip confirmation prompt and uninstall directly (for automation/scripting)
+#   noninteractive=true          跳过确认提示，直接执行卸载（推荐用于自动化/脚本调用）
+#                                Skip confirmation prompt and uninstall directly (recommended for automation)
+#
+#   INCUS_FORCE_UNINSTALL=true   兼容旧版强制卸载变量
+#                                Backward-compatible force uninstall flag
 
 cd /root >/dev/null 2>&1
 
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+
+is_noninteractive() {
+    case "${noninteractive:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    case "${INCUS_NONINTERACTIVE:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    case "${INCUS_FORCE_UNINSTALL:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    return 1
+}
 
 # ==============================
 # 权限检查 / Root check
@@ -26,14 +42,14 @@ fi
 # ==============================
 # 确认操作 / Confirm operation
 # ==============================
-if [ "${INCUS_FORCE_UNINSTALL:-false}" != "true" ]; then
+if ! is_noninteractive; then
     _yellow "警告：此操作将彻底卸载 Incus 及其所有相关环境！"
     _yellow "WARNING: This will completely uninstall Incus and ALL related environments!"
     _yellow "包括所有容器、虚拟机、镜像、存储池和配置文件。"
     _yellow "This includes all containers, VMs, images, storage pools and config files."
     _yellow ""
-    _yellow "若要跳过此确认，请设置环境变量：INCUS_FORCE_UNINSTALL=true"
-    _yellow "To skip this prompt, set env var: INCUS_FORCE_UNINSTALL=true"
+    _yellow "若要跳过此确认，请设置环境变量：noninteractive=true"
+    _yellow "To skip this prompt, set env var: noninteractive=true"
     read -rp "$(echo -e "\033[33m\033[01m确认继续？(输入 yes 继续，其他输入退出) / Confirm? (type 'yes' to continue): \033[0m")" _confirm
     if [ "$_confirm" != "yes" ]; then
         _red "操作已取消 / Operation cancelled"

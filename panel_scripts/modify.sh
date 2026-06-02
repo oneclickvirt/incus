@@ -15,6 +15,20 @@ nat1="${3:-20002}"
 nat2="${4:-20025}"
 in="${5:-300}"
 out="${6:-300}"
+
+detect_container_system() {
+    incus exec "$name" -- sh -c '
+        if [ -r /etc/os-release ]; then
+            . /etc/os-release
+            printf "%s %s %s\n" "${ID:-}" "${ID_LIKE:-}" "${NAME:-}"
+        elif [ -r /etc/openwrt_release ]; then
+            echo openwrt
+        else
+            uname -s
+        fi
+    ' 2>/dev/null | tr '[:upper:]' '[:lower:]'
+}
+
 # 支持docker虚拟化
 incus config set "$name" security.nesting true
 ori=$(date | md5sum)
@@ -22,24 +36,24 @@ passwd=${ori:2:9}
 incus start "$name"
 sleep 1
 /usr/local/bin/check-dns.sh
+system="$(detect_container_system)"
 if echo "$system" | grep -qiE "centos" || echo "$system" | grep -qiE "almalinux" || echo "$system" | grep -qiE "fedora" || echo "$system" | grep -qiE "rocky"; then
-    incus exec "$name" -- sudo yum update -y
-    incus exec "$name" -- sudo yum update -y
-    incus exec "$name" -- sudo yum install -y curl
-    incus exec "$name" -- sudo yum install -y dos2unix
+    incus exec "$name" -- yum update -y
+    incus exec "$name" -- yum install -y curl
+    incus exec "$name" -- yum install -y dos2unix
 elif echo "$system" | grep -qiE "alpine"; then
     incus exec "$name" -- apk update
     incus exec "$name" -- apk add --no-cache curl
-elif echo "$system" | grep -qiE "archlinux"; then
+elif echo "$system" | grep -qiE "arch|archlinux"; then
     incus exec "$name" -- pacman -Sy
     incus exec "$name" -- pacman -Sy --noconfirm --needed curl
     incus exec "$name" -- pacman -Sy --noconfirm --needed dos2unix
 elif echo "$system" | grep -qiE "openwrt"; then
     incus exec "$name" -- opkg update
 else
-    incus exec "$name" -- sudo apt-get update -y
-    incus exec "$name" -- sudo apt-get install curl -y --fix-missing
-    incus exec "$name" -- sudo apt-get install dos2unix -y --fix-missing
+    incus exec "$name" -- apt-get update -y
+    incus exec "$name" -- apt-get install curl -y --fix-missing
+    incus exec "$name" -- apt-get install dos2unix -y --fix-missing
 fi
 if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
     if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
@@ -61,7 +75,7 @@ else
     incus file push /root/ssh_bash.sh "$name"/root/
     incus exec "$name" -- chmod 777 ssh_bash.sh
     incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
+    incus exec "$name" -- ./ssh_bash.sh "$passwd"
     if [ ! -f /usr/local/bin/config.sh ]; then
         curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
         chmod 777 /usr/local/bin/config.sh
@@ -96,8 +110,8 @@ ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed
 echo "Host IPv4 address: $ipv4_address"
 # 是否要创建V6地址
 if [ -n "$7" ]; then
-    if [ "$7" == "Y" ]; then
-        incus exec "$name" -- echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
+    if [[ "$7" =~ ^[Yy]$ ]]; then
+        incus exec "$name" -- /bin/sh -c '(crontab -l 2>/dev/null; echo "*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb") | crontab -'
         sleep 1
         if [ ! -f "./build_ipv6_network.sh" ]; then
             # 如果不存在，则从指定 URL 下载并添加可执行权限
@@ -115,7 +129,9 @@ else
 fi
 # 上传 下载 最大
 incus config device override "$name" eth0 limits.egress="$out"Mbit limits.ingress="$in"Mbit limits.max="$speed_limit"Mbit
-incus config device set "$name" eth0 ipv4.address="$container_ip"
+if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
+    incus config device override "$name" eth0 ipv4.address="$container_ip"
+fi
 incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
 if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
     incus config device add "$name" nattcp-ports proxy listen=tcp:$ipv4_address:$nat1-$nat2 connect=tcp:0.0.0.0:$nat1-$nat2 nat=true
@@ -131,7 +147,7 @@ fi
 if [ "$nat1" != "0" ] && [ "$nat2" != "0" ]; then
     echo "$name $sshn $passwd $nat1 $nat2" >"$name"
     echo "$name $sshn $passwd $nat1 $nat2"
-    exit 1
+    exit 0
 fi
 if [ "$nat1" == "0" ] && [ "$nat2" == "0" ]; then
     echo "$name $sshn $passwd" >"$name"
