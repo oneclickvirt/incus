@@ -2,7 +2,7 @@
 # by https://github.com/oneclickvirt/incus
 # 2025.08.14
 
-cd /root >/dev/null 2>&1
+cd /root >/dev/null 2>&1 || exit 1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "FreeBSD")
 CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')" "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(uname -s)")
@@ -28,10 +28,10 @@ done
 if [ ! -d "/usr/local/bin" ]; then
     mkdir -p /usr/local/bin
 fi
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 
 # 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
@@ -182,78 +182,6 @@ service_manager() {
 
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 
-# 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
-service_manager() {
-    local action=$1
-    local service_name=$2
-    
-    case "$action" in
-        enable)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl enable "$service_name" 2>/dev/null || true
-            elif command -v rc-update >/dev/null 2>&1; then
-                rc-update add "$service_name" default 2>/dev/null || true
-            elif command -v chkconfig >/dev/null 2>&1; then
-                chkconfig "$service_name" on 2>/dev/null || true
-            fi
-            ;;
-        disable)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl disable "$service_name" 2>/dev/null || true
-            elif command -v rc-update >/dev/null 2>&1; then
-                rc-update del "$service_name" default 2>/dev/null || true
-            elif command -v chkconfig >/dev/null 2>&1; then
-                chkconfig "$service_name" off 2>/dev/null || true
-            fi
-            ;;
-        start)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl start "$service_name" 2>/dev/null || true
-            elif command -v rc-service >/dev/null 2>&1; then
-                rc-service "$service_name" start 2>/dev/null || true
-            elif command -v service >/dev/null 2>&1; then
-                service "$service_name" start 2>/dev/null || true
-            fi
-            ;;
-        stop)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl stop "$service_name" 2>/dev/null || true
-            elif command -v rc-service >/dev/null 2>&1; then
-                rc-service "$service_name" stop 2>/dev/null || true
-            elif command -v service >/dev/null 2>&1; then
-                service "$service_name" stop 2>/dev/null || true
-            fi
-            ;;
-        restart)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl restart "$service_name" 2>/dev/null || true
-            elif command -v rc-service >/dev/null 2>&1; then
-                rc-service "$service_name" restart 2>/dev/null || true
-            elif command -v service >/dev/null 2>&1; then
-                service "$service_name" restart 2>/dev/null || true
-            fi
-            ;;
-        daemon-reload)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl daemon-reload 2>/dev/null || true
-            fi
-            # OpenRC不需要daemon-reload
-            ;;
-        is-active)
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl is-active --quiet "$service_name" 2>/dev/null
-            elif command -v rc-service >/dev/null 2>&1; then
-                rc-service "$service_name" status >/dev/null 2>&1
-            elif command -v service >/dev/null 2>&1; then
-                service "$service_name" status >/dev/null 2>&1
-            else
-                return 1
-            fi
-            ;;
-    esac
-}
-
-cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
 export DEBIAN_FRONTEND=noninteractive
 if [[ -z "$utf8_locale" ]]; then
@@ -292,7 +220,8 @@ install_package() {
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -346,8 +275,8 @@ files=(
 for file in "${files[@]}"; do
     filename=$(basename "$file")
     rm -rf "$filename"
-    curl -sLk "${cdn_success_url}${file}" -o "$filename"
-    chmod 777 "$filename"
+    curl -fsSLk "${cdn_success_url}${file}" -o "$filename" || exit 1
+    chmod 755 "$filename"
     dos2unix "$filename"
 done
 cp /root/ssh_sh.sh /usr/local/bin
@@ -384,10 +313,10 @@ incus network set incusbr0 ipv4.dhcp true
 incus network set incusbr0 ipv6.dhcp true
 # 解除进程数限制
 if [ -f "/etc/security/limits.conf" ]; then
-    if ! grep -q "*          hard    nproc       unlimited" /etc/security/limits.conf; then
+    if ! grep -Fq "*          hard    nproc       unlimited" /etc/security/limits.conf; then
         echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
     fi
-    if ! grep -q "*          soft    nproc       unlimited" /etc/security/limits.conf; then
+    if ! grep -Fq "*          soft    nproc       unlimited" /etc/security/limits.conf; then
         echo '*          soft    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
     fi
 fi
@@ -405,11 +334,11 @@ install_package libsqlite3-0
 install_package libsqlite3-dev
 install_package libgd3
 install_package libgd-dev
-cd /usr/src
+cd /usr/src || exit 1
 wget https://humdi.net/vnstat/vnstat-2.11.tar.gz
-chmod 777 vnstat-2.11.tar.gz
+chmod 755 vnstat-2.11.tar.gz
 tar zxvf vnstat-2.11.tar.gz
-cd vnstat-2.11
+cd vnstat-2.11 || exit 1
 ./configure --prefix=/usr --sysconfdir=/etc && make && make install
 cp -v examples/systemd/vnstat.service /etc/systemd/system/
 service_manager enable vnstat
@@ -421,20 +350,20 @@ vnstati -v
 
 # 加装证书
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
-chmod 777 ~/.config/incus/client.crt
+chmod 644 ~/.config/incus/client.crt
 # 双确认，部分版本切换了命令
 incus config trust add ~/.config/incus/client.crt
 incus config trust add-certificate ~/.config/incus/client.crt
 incus config set core.https_address :8443
 
 # wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O /root/snap/lxd/common/config/client.crt
-# chmod 777 /root/snap/lxd/common/config/client.crt
+# chmod 644 /root/snap/lxd/common/config/client.crt
 # incus config trust add /root/snap/lxd/common/config/client.crt
 # incus config set core.https_address :9969
 
 # 加载修改脚本
 wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/modify.sh -O /root/modify.sh
-chmod 777 /root/modify.sh
+chmod 755 /root/modify.sh
 ufw disable || true
 incus remote list
 incus remote remove spiritlhl

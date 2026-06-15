@@ -11,7 +11,7 @@
 #   INCUS_FORCE_UNINSTALL=true   兼容旧版强制卸载变量
 #                                Backward-compatible force uninstall flag
 
-cd /root >/dev/null 2>&1
+cd /root >/dev/null 2>&1 || exit 1
 
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
@@ -253,8 +253,11 @@ LEFTOVER_FILES=(
     /usr/local/bin/ssh_bash.sh
     /usr/local/bin/ssh_sh.sh
     /usr/local/bin/config.sh
+    /usr/local/bin/image_lookup.sh
     /usr/local/bin/buildct.sh
     /usr/local/bin/buildvm.sh
+    /usr/local/bin/instance_ops.sh
+    /usr/local/bin/macvlan.sh
     /usr/local/bin/coexistence.sh
     /usr/local/bin/docker-coexistence.sh
     /usr/local/bin/incus_fixed_restart.sh
@@ -299,12 +302,57 @@ if [ -f /etc/sysctl.d/99-custom.conf ]; then
     [ ! -s /etc/sysctl.d/99-custom.conf ] && rm -f /etc/sysctl.d/99-custom.conf
 fi
 
+remove_incus_nftables_config() {
+    local config_file="/etc/nftables.conf"
+    local tmp_file
+    [ -f "$config_file" ] || return 0
+    grep -Eq '^[[:space:]]*table[[:space:]]+(inet[[:space:]]+incus_(masq|block)|ip6[[:space:]]+incus_ipv6_nat)[[:space:]]*\{' "$config_file" || return 0
+    tmp_file="$(mktemp)"
+    awk '
+        /^[[:space:]]*table[[:space:]]+(inet[[:space:]]+incus_(masq|block)|ip6[[:space:]]+incus_ipv6_nat)[[:space:]]*\{/ {
+            skip = 1
+            depth = 0
+        }
+        skip {
+            for (i = 1; i <= length($0); i++) {
+                ch = substr($0, i, 1)
+                if (ch == "{") {
+                    depth++
+                } else if (ch == "}") {
+                    depth--
+                }
+            }
+            if (depth <= 0) {
+                skip = 0
+            }
+            next
+        }
+        { print }
+    ' "$config_file" > "$tmp_file" && cat "$tmp_file" > "$config_file"
+    rm -f "$tmp_file"
+}
+
+delete_iptables_drop_rule() {
+    local iface="$1"
+    local port="$2"
+    [ -n "$iface" ] || return 0
+    iptables -D FORWARD -o "$iface" -p tcp --dport "$port" -j DROP 2>/dev/null || true
+    iptables -D FORWARD -o "$iface" -p udp --dport "$port" -j DROP 2>/dev/null || true
+}
+
 # ==============================
-# 清理 iptables 规则
-# Clean up iptables rules
+# 清理 nftables / iptables 规则
+# Clean up nftables / iptables rules
 # ==============================
-_green "[9/9] 清理 iptables 规则 / Cleaning up iptables rules..."
+_green "[9/9] 清理防火墙规则 / Cleaning up firewall rules..."
+if command -v nft >/dev/null 2>&1; then
+    nft delete table inet incus_masq 2>/dev/null || true
+    nft delete table inet incus_block 2>/dev/null || true
+    nft delete table ip6 incus_ipv6_nat 2>/dev/null || true
+    remove_incus_nftables_config
+fi
 if command -v iptables >/dev/null 2>&1; then
+    default_iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
     # 清理 NAT MASQUERADE
     iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
     # 清理 incusbr0 相关 FORWARD 规则
@@ -312,8 +360,10 @@ if command -v iptables >/dev/null 2>&1; then
     iptables -D FORWARD -o incusbr0 -j ACCEPT 2>/dev/null || true
     # 清理端口屏蔽规则
     for port in 3389 8888 54321 65432; do
-        iptables -D FORWARD -o eth0 -p tcp --dport "$port" -j DROP 2>/dev/null || true
-        iptables -D FORWARD -o eth0 -p udp --dport "$port" -j DROP 2>/dev/null || true
+        delete_iptables_drop_rule "$default_iface" "$port"
+        if [ "$default_iface" != "eth0" ]; then
+            delete_iptables_drop_rule "eth0" "$port"
+        fi
     done
     # 保存规则
     if command -v netfilter-persistent >/dev/null 2>&1; then

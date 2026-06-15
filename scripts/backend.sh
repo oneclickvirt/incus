@@ -98,11 +98,11 @@ apt install libsqlite3-0 -y
 apt install libsqlite3-dev -y
 apt install libgd3 -y
 apt install libgd-dev -y
-cd /usr/src
+cd /usr/src || exit 1
 wget https://humdi.net/vnstat/vnstat-2.11.tar.gz
-chmod 777 vnstat-2.11.tar.gz
+chmod 755 vnstat-2.11.tar.gz
 tar zxvf vnstat-2.11.tar.gz
-cd vnstat-2.11
+cd vnstat-2.11 || exit 1
 ./configure --prefix=/usr --sysconfdir=/etc && make && make install
 cp -v examples/systemd/vnstat.service /etc/systemd/system/
 service_manager enable vnstat
@@ -111,4 +111,3 @@ pgrep -c vnstatd
 vnstat -v
 vnstatd -v
 vnstati -v
-

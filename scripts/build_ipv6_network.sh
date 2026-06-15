@@ -3,10 +3,10 @@
 # 2025.08.14
 
 # 字体颜色函数
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 
 # 服务管理兼容性函数：支持systemd、OpenRC和传统service命令
 # 在混合环境中会尝试多个命令以确保操作成功
@@ -121,6 +121,30 @@ safe_grep() {
     else
         grep "$@"
     fi
+}
+
+detect_primary_ipv6_iface() {
+    local iface iface_path
+    iface=$(ip -6 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+    if [ -n "$iface" ]; then
+        echo "$iface"
+        return
+    fi
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [ -n "$iface" ]; then
+        echo "$iface"
+        return
+    fi
+    for iface_path in /sys/class/net/*; do
+        [ -e "$iface_path" ] || continue
+        iface=${iface_path##*/}
+        case "$iface" in
+        lo | veth* | br* | incus* | docker* | tap*) continue ;;
+        esac
+        echo "$iface"
+        return
+    done
+    echo "eth0"
 }
 
 # 设置环境变量
@@ -403,7 +427,8 @@ install_package() {
 # 检查CDN
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -541,7 +566,7 @@ wait_for_container_running() {
         if [[ "$status" == *RUNNING* ]]; then
             break
         fi
-        echo "Waiting for the conatiner "$container_name" to run..."
+        echo "Waiting for the container $container_name to run..."
         echo "${status}"
         sleep $interval
         elapsed_time=$((elapsed_time + interval))
@@ -560,7 +585,7 @@ wait_for_container_stopped() {
         if [[ "$status" == *STOPPED* ]]; then
             break
         fi
-        echo "Waiting for the conatiner "$container_name" to stop..."
+        echo "Waiting for the container $container_name to stop..."
         echo "${status}"
         sleep $interval
         elapsed_time=$((elapsed_time + interval))
@@ -570,7 +595,8 @@ wait_for_container_stopped() {
 # 获取容器内网IPv6地址
 get_container_ipv6() {
     local container_name=$1
-    local ipv6=$(incus list $container_name --format=json | jq -r '.[0].state.network.eth0.addresses[] | select(.family=="inet6") | select(.scope=="global") | .address')
+    local ipv6
+    ipv6=$(incus list "$container_name" --format=json | jq -r '.[0].state.network.eth0.addresses[] | select(.family=="inet6") | select(.scope=="global") | .address')
     if [ -z "$ipv6" ]; then
         _red "Container has no intranet IPV6 address, no auto-mapping"
         _red "容器无内网IPV6地址，不进行自动映射"
@@ -583,7 +609,8 @@ get_container_ipv6() {
 
 # 获取宿主机IPv6子网前缀
 get_host_ipv6_prefix() {
-    local prefix=$(ip -6 addr show | safe_grep 'inet6.*global' | awk '{print $2}' | awk -F'/' '{print $1}' | head -n 1 | cut -d ':' -f1-5):
+    local prefix
+    prefix=$(ip -6 addr show | safe_grep 'inet6.*global' | awk '{print $2}' | awk -F'/' '{print $1}' | head -n 1 | cut -d ':' -f1-5):
     if [ -z "$prefix" ]; then
         _red "No IPV6 subnet, no automatic mapping"
         _red "无 IPV6 子网，不进行自动映射"
@@ -596,8 +623,10 @@ get_host_ipv6_prefix() {
 
 # 获取IPv6网关信息
 get_ipv6_gateway_info() {
-    local output=$(ip -6 route show | awk '/default via/{print $3}')
-    local num_lines=$(echo "$output" | wc -l)
+    local output
+    local num_lines
+    output=$(ip -6 route show | awk '/default via/{print $3}')
+    num_lines=$(echo "$output" | wc -l)
     local ipv6_gateway=""
     if [ $num_lines -eq 1 ]; then
         ipv6_gateway="$output"
@@ -677,8 +706,8 @@ setup_network_device_ipv6() {
             ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
         fi
     else
-        ipv6_network_name=$(ls /sys/class/net/ | grep -v "$(ls /sys/devices/virtual/net/)")
-        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
+        ipv6_network_name=$(detect_primary_ipv6_iface)
+        ip_network_gam=$(ip -6 addr show "$ipv6_network_name" | grep global | awk '{print $2}' | head -n 1)
     fi
     _yellow "Local IPV6 address: $ip_network_gam"
     # 尝试从路由器获取真实的 IPv6 前缀长度
@@ -716,32 +745,34 @@ setup_network_device_ipv6() {
         incus stop "$container_name"
         sleep 3
         wait_for_container_stopped "$container_name"
-        incus config device add "$container_name" eth1 nic nictype=routed parent=${ipv6_network_name} ipv6.address=${incus_ipv6}
+        incus config device add "$container_name" eth1 nic nictype=routed parent="$ipv6_network_name" ipv6.address="$incus_ipv6"
         sleep 3
         if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --permanent --zone=trusted --add-interface=${ipv6_network_name}
+            firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name"
             firewall-cmd --reload
         elif command -v ufw >/dev/null 2>&1; then
-            ufw allow in on ${ipv6_network_name}
-            ufw allow out on ${ipv6_network_name}
+            ufw allow in on "$ipv6_network_name"
+            ufw allow out on "$ipv6_network_name"
             ufw reload
         fi
         incus start "$container_name"
         if [[ "${ipv6_gateway_fe80}" == "N" ]]; then
-            inter=$(ls /sys/class/net/ | grep -v "$(ls /sys/devices/virtual/net/)")
-            del_ip=$(ip -6 addr show dev ${inter} | awk '/inet6 fe80/ {print $2}')
+            inter=$(detect_primary_ipv6_iface)
+            del_ip=$(ip -6 addr show dev "$inter" | awk '/inet6 fe80/ {print $2}')
             if [ -n "$del_ip" ]; then
-                ip addr del ${del_ip} dev ${inter}
+                ip addr del "$del_ip" dev "$inter"
                 echo '#!/bin/bash' >/usr/local/bin/remove_route.sh
                 echo "ip addr del ${del_ip} dev ${inter}" >>/usr/local/bin/remove_route.sh
-                chmod 777 /usr/local/bin/remove_route.sh
-                if ! crontab -l | grep -q '/usr/local/bin/remove_route.sh' &>/dev/null; then
-                    echo '@reboot /usr/local/bin/remove_route.sh' | crontab -
+                chmod 755 /usr/local/bin/remove_route.sh
+                if ! crontab -l 2>/dev/null | grep -Fq '/usr/local/bin/remove_route.sh'; then
+                    (crontab -l 2>/dev/null; echo '@reboot /usr/local/bin/remove_route.sh') | crontab -
                 fi
             fi
         fi
-        if ! crontab -l | grep -q '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb'; then
-            echo '*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb' | crontab -
+        local cron_line
+        cron_line='*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb'
+        if ! crontab -l 2>/dev/null | grep -Fqx "$cron_line"; then
+            (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
         fi
         echo "$incus_ipv6" >>"$container_name"_v6
     fi
@@ -772,7 +803,7 @@ setup_iptables_ipv6() {
     # Find available IPv6 address
     for i in $(seq 3 65535); do
         IPV6="${subnet_prefix}$i"
-        [[ $IPV6 == $container_ipv6 ]] && continue
+        [[ $IPV6 == "$container_ipv6" ]] && continue
         ip -6 addr show dev "$interface" | grep -qw "$IPV6" && continue
         if ! ping6 -c1 -w1 -q "$IPV6" &>/dev/null; then
             if [ "$use_nft" = true ]; then
@@ -805,7 +836,9 @@ setup_iptables_ipv6() {
         # Use nftables for IPv6 DNAT (handles v6 natively)
         nft add table ip6 incus_ipv6_nat 2>/dev/null || true
         nft add chain ip6 incus_ipv6_nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
-        nft add rule ip6 incus_ipv6_nat prerouting ip6 daddr "$IPV6" dnat to "$container_ipv6"
+        if ! nft list chain ip6 incus_ipv6_nat prerouting 2>/dev/null | grep -F -- "ip6 daddr $IPV6 dnat to $container_ipv6" >/dev/null 2>&1; then
+            nft add rule ip6 incus_ipv6_nat prerouting ip6 daddr "$IPV6" dnat to "$container_ipv6"
+        fi
         # Persist only our own tables, not incusd's managed 'incus' table
         {
             nft list table ip6 incus_ipv6_nat 2>/dev/null || true
@@ -819,11 +852,13 @@ setup_iptables_ipv6() {
         service_manager enable firewalld
         service_manager start firewalld
         sleep 3
-        firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
+        firewall-cmd --permanent --direct --query-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6" >/dev/null 2>&1 ||
+            firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
         firewall-cmd --reload
     else
         # Fallback to ip6tables with persistence
-        ip6tables -t nat -A PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
+        ip6tables -t nat -C PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" 2>/dev/null ||
+            ip6tables -t nat -A PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
         if command -v apt >/dev/null 2>&1; then
             DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
         fi

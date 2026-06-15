@@ -22,8 +22,8 @@ check_grep_extended_regex() {
 
 # 安全的 sed 替换函数
 safe_sed() {
-    local pattern="$1"
-    local file="$2"
+    pattern="$1"
+    file="$2"
     sed $SED_EXTENDED -i "$pattern" "$file"
 }
 
@@ -52,7 +52,7 @@ for file in "$config_dir"*; do
     fi
   fi
 done
-if [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "alpine" ]; then
+if [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" = "alpine" ]; then
   apk update
   apk add --no-cache openssh-server
   apk add --no-cache sshpass
@@ -62,7 +62,7 @@ if [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" =
   apk add --no-cache wget
   apk add --no-cache cronie
   apk add --no-cache cron
-  cd /etc/ssh
+  cd /etc/ssh || exit 1
   ssh-keygen -A
   chattr -i /etc/ssh/sshd_config
   sed -i '/^#PermitRootLogin\|PermitRootLogin/c PermitRootLogin yes' /etc/ssh/sshd_config
@@ -83,7 +83,7 @@ if [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" =
   rc-update add sshd default
   echo root:"$1" | chpasswd root
   chattr +i /etc/ssh/sshd_config
-elif [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" == "openwrt" ]; then
+elif [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')" = "openwrt" ]; then
   opkg update
   opkg install openssh-server
   opkg install bash
@@ -94,7 +94,7 @@ elif [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')"
   opkg install cron
   /etc/init.d/sshd enable
   /etc/init.d/sshd start
-  cd /etc/ssh
+  cd /etc/ssh || exit 1
   ssh-keygen -A
   chattr -i /etc/ssh/sshd_config
   sed -i "s/^#\?Port.*/Port 22/g" /etc/ssh/sshd_config
@@ -106,7 +106,7 @@ elif [ "$(cat /etc/os-release | safe_grep '^ID=' | cut -d '=' -f 2 | tr -d '"')"
   sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication no/g" /etc/ssh/sshd_config
   sed -i '/^AuthorizedKeysFile/s/^/#/' /etc/ssh/sshd_config
   chattr +i /etc/ssh/sshd_config
-  echo -e "$1\n$1" | passwd root
+  printf '%s\n%s\n' "$1" "$1" | passwd root
   /etc/init.d/sshd restart
 fi
 /etc/init.d/cron enable || true

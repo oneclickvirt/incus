@@ -8,7 +8,7 @@
 # 如果 外网起端口 外网止端口 都设置为0则不做区间外网端口映射了，只映射基础的SSH端口，注意不能为空，不进行映射需要设置为0
 
 # 创建容器
-cd /root >/dev/null 2>&1
+cd /root >/dev/null 2>&1 || exit 1
 name="${1:-test}"
 sshn="${2:-20001}"
 nat1="${3:-20002}"
@@ -29,10 +29,23 @@ detect_container_system() {
     ' 2>/dev/null | tr '[:upper:]' '[:lower:]'
 }
 
+generate_password() {
+    local generated=""
+    if command -v openssl >/dev/null 2>&1; then
+        generated="$(openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 16)"
+    fi
+    if [ -z "$generated" ] && [ -r /dev/urandom ]; then
+        generated="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    fi
+    if [ -z "$generated" ]; then
+        generated="$(date +%s%N 2>/dev/null | sha256sum | cut -c 1-16)"
+    fi
+    echo "$generated"
+}
+
 # 支持docker虚拟化
 incus config set "$name" security.nesting true
-ori=$(date | md5sum)
-passwd=${ori:2:9}
+passwd="$(generate_password)"
 incus start "$name"
 sleep 1
 /usr/local/bin/check-dns.sh
@@ -57,28 +70,28 @@ else
 fi
 if echo "$system" | grep -qiE "alpine" || echo "$system" | grep -qiE "openwrt"; then
     if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
-        curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
-        chmod 777 /usr/local/bin/ssh_sh.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_sh.sh
         dos2unix /usr/local/bin/ssh_sh.sh
     fi
     cp /usr/local/bin/ssh_sh.sh /root
     incus file push /root/ssh_sh.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_sh.sh
-    incus exec "$name" -- ./ssh_sh.sh ${passwd}
+    incus exec "$name" -- chmod 755 ssh_sh.sh
+    incus exec "$name" -- ./ssh_sh.sh "$passwd"
 else
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-        chmod 777 /usr/local/bin/ssh_bash.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_bash.sh
         dos2unix /usr/local/bin/ssh_bash.sh
     fi
     cp /usr/local/bin/ssh_bash.sh /root
     incus file push /root/ssh_bash.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_bash.sh
+    incus exec "$name" -- chmod 755 ssh_bash.sh
     incus exec "$name" -- dos2unix ssh_bash.sh
     incus exec "$name" -- ./ssh_bash.sh "$passwd"
     if [ ! -f /usr/local/bin/config.sh ]; then
-        curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
-        chmod 777 /usr/local/bin/config.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh || exit 1
+        chmod 755 /usr/local/bin/config.sh
         dos2unix /usr/local/bin/config.sh
     fi
     cp /usr/local/bin/config.sh /root
@@ -111,11 +124,11 @@ echo "Host IPv4 address: $ipv4_address"
 # 是否要创建V6地址
 if [ -n "$7" ]; then
     if [[ "$7" =~ ^[Yy]$ ]]; then
-        incus exec "$name" -- /bin/sh -c '(crontab -l 2>/dev/null; echo "*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb") | crontab -'
+        incus exec "$name" -- /bin/sh -c 'cron_line="*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb"; crontab -l 2>/dev/null | grep -Fqx "$cron_line" || (crontab -l 2>/dev/null; echo "$cron_line") | crontab -'
         sleep 1
         if [ ! -f "./build_ipv6_network.sh" ]; then
             # 如果不存在，则从指定 URL 下载并添加可执行权限
-            curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh && chmod +x build_ipv6_network.sh
+            curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh && chmod +x build_ipv6_network.sh || exit 1
         fi
         ./build_ipv6_network.sh "$name"
     fi

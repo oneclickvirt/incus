@@ -6,12 +6,20 @@ INSTALL_PATH="/usr/local/bin/incus_fixed_restart.sh"
 LOG_FILE="/usr/local/bin/incus_fixed_restart.log"
 COUNTER_FILE="/usr/local/bin/incus_fixed_restart_counter"
 CPULIMIT_PID_FILE="/usr/local/bin/incus_cpulimit.pid"
-SERVICE_NAME="incus"
 PROCESS_NAME="incusd"
 CPU_THRESHOLD=80.0
 CPU_LIMIT=70
 MAX_COUNT=3
 MAX_LOG_LINES=1000
+
+run_as_root_logged() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@" >> "$LOG_FILE" 2>&1
+        return $?
+    fi
+    sudo "$@" 2>&1 | sudo tee -a "$LOG_FILE" >/dev/null
+    return "${PIPESTATUS[0]}"
+}
 
 get_package_manager() {
     if command -v apt-get &> /dev/null; then
@@ -49,22 +57,22 @@ install_cpulimit() {
     
     case "$pkg_manager" in
         apt)
-            sudo apt-get install -y cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged apt-get install -y cpulimit
             ;;
         yum)
-            sudo yum install -y cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged yum install -y cpulimit
             ;;
         dnf)
-            sudo dnf install -y cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged dnf install -y cpulimit
             ;;
         pacman)
-            sudo pacman -S --noconfirm cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged pacman -S --noconfirm cpulimit
             ;;
         apk)
-            sudo apk add --no-cache cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged apk add --no-cache cpulimit
             ;;
         zypper)
-            sudo zypper install -y cpulimit >> "$LOG_FILE" 2>&1
+            run_as_root_logged zypper install -y cpulimit
             ;;
     esac
     
@@ -123,8 +131,16 @@ apply_cpulimit() {
     fi
     
     echo "$(get_timestamp) - Applying CPU limit ($CPU_LIMIT%) to $PROCESS_NAME (PID: $pid)" >> "$LOG_FILE"
-    sudo cpulimit -e "$PROCESS_NAME" -l "$CPU_LIMIT" -b >> "$LOG_FILE" 2>&1 &
-    echo $! > "$CPULIMIT_PID_FILE"
+    if ! run_as_root_logged cpulimit -e "$PROCESS_NAME" -l "$CPU_LIMIT" -b; then
+        echo "$(get_timestamp) - Error: Failed to apply cpulimit" >> "$LOG_FILE"
+        return 1
+    fi
+    sleep 1
+    local limit_pid
+    limit_pid=$(pgrep -f "cpulimit.*${PROCESS_NAME}" | head -n 1)
+    if [ -n "$limit_pid" ]; then
+        echo "$limit_pid" > "$CPULIMIT_PID_FILE"
+    fi
     
     return 0
 }
@@ -157,6 +173,10 @@ monitor_incusd() {
     local current_time cpu_usage cpu_usage_num counter
     current_time=$(get_timestamp)
     cpu_usage=$(get_cpu_usage)
+    counter=$(<"$COUNTER_FILE")
+    if ! [[ "$counter" =~ ^[0-9]+$ ]]; then
+        counter=0
+    fi
     
     if [ -z "$cpu_usage" ]; then
         echo "$current_time - $PROCESS_NAME is not running" >> "$LOG_FILE"

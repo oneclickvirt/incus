@@ -9,7 +9,7 @@ service_manager() {
     local service_name=$2
     local executed=false
     local success=false
-    
+
     case "$action" in
         enable)
             if command -v systemctl >/dev/null 2>&1; then
@@ -72,7 +72,7 @@ service_manager() {
             fi
             ;;
     esac
-    
+
     if $executed; then
         return 0
     else

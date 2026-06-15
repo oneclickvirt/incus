@@ -1,0 +1,41 @@
+name: Shell CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: shell-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  noninteractive: "true"
+
+jobs:
+  bash-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(find scripts panel_scripts extra_scripts tests -type f -name '*.sh' -print | sort)
+
+      - name: Run shell tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/image_lookup_test.sh
+
+      - name: Check shell lint errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck -S error $(find scripts panel_scripts extra_scripts tests -type f -name '*.sh' -print | sort)

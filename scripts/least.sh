@@ -5,7 +5,7 @@
 # ./least.sh NAT服务器前缀 数量
 # 2025.08.03
 
-cd /root >/dev/null 2>&1
+cd /root >/dev/null 2>&1 || exit 1
 if [ ! -d "/usr/local/bin" ]; then
     mkdir -p "/usr/local/bin"
 fi
@@ -22,7 +22,8 @@ check_china() {
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -73,11 +74,69 @@ retry_wget() {
     return 1
 }
 
+generate_password() {
+    local generated=""
+    if command -v openssl >/dev/null 2>&1; then
+        generated="$(openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 16)"
+    fi
+    if [ -z "$generated" ] && [ -r /dev/urandom ]; then
+        generated="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    fi
+    if [ -z "$generated" ]; then
+        generated="$(date +%s%N 2>/dev/null | sha256sum | cut -c 1-16)"
+    fi
+    echo "$generated"
+}
+
+nft_rule_exists() {
+    local family="$1"
+    local table="$2"
+    local chain="$3"
+    local pattern="$4"
+    nft list chain "$family" "$table" "$chain" 2>/dev/null | grep -F -- "$pattern" >/dev/null 2>&1
+}
+
+add_nft_rule_once() {
+    local family="$1"
+    local table="$2"
+    local chain="$3"
+    local pattern="$4"
+    shift 4
+    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || true
+}
+
+add_iptables_drop_once() {
+    local iface="$1"
+    local proto="$2"
+    local port="$3"
+    iptables --ipv4 -C FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null ||
+        iptables --ipv4 -I FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null || true
+}
+
+detect_primary_iface() {
+    local iface iface_path
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [ -n "$iface" ]; then
+        echo "$iface"
+        return
+    fi
+    for iface_path in /sys/class/net/*; do
+        [ -e "$iface_path" ] || continue
+        iface=${iface_path##*/}
+        case "$iface" in
+        lo | veth* | br* | incus* | docker* | tap*) continue ;;
+        esac
+        echo "$iface"
+        return
+    done
+    echo "eth0"
+}
+
 import_image() {
     local image_name="$1"
     local image_url="$2"
     retry_wget "${cdn_success_url}${image_url}" "$image_name"
-    chmod 777 "$image_name"
+    chmod 755 "$image_name"
     unzip "$image_name"
     rm -rf "$image_name"
     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
@@ -101,7 +160,7 @@ create_base_container() {
         local image_file="debian_11_${sys_bit}_cloud.zip"
         if retry_wget "$image_url" "$image_file"; then
             echo "镜像下载成功，正在导入..."
-            chmod 777 "$image_file"
+            chmod 755 "$image_file"
             unzip "$image_file"
             if [ -f "incus.tar.xz" ] && [ -f "rootfs.squashfs" ]; then
                 incus image import incus.tar.xz rootfs.squashfs --alias "debian11-${sys_bit}"
@@ -161,20 +220,14 @@ block_ports() {
     local blocked_ports=(3389 8888 54321 65432)
     # Detect primary outbound interface
     local iface
-    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
-    if [ -z "$iface" ]; then
-        iface=$(ls /sys/class/net/ 2>/dev/null | grep -v lo | grep -v 'veth\|br\|incus\|docker\|tap' | head -1)
-    fi
-    if [ -z "$iface" ]; then
-        iface="eth0"
-    fi
+    iface=$(detect_primary_iface)
     # Try nftables first
     if command -v nft >/dev/null 2>&1; then
         nft add table inet incus_block 2>/dev/null || true
         nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
         for port in "${blocked_ports[@]}"; do
-            nft add rule inet incus_block forward oifname "$iface" tcp dport "$port" drop 2>/dev/null || true
-            nft add rule inet incus_block forward oifname "$iface" udp dport "$port" drop 2>/dev/null || true
+            add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop
+            add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop
         done
         # Only save our own tables, not incusd's managed 'incus' table
         { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
@@ -194,8 +247,8 @@ block_ports() {
             nft add table inet incus_block 2>/dev/null || true
             nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
             for port in "${blocked_ports[@]}"; do
-                nft add rule inet incus_block forward oifname "$iface" tcp dport "$port" drop 2>/dev/null || true
-                nft add rule inet incus_block forward oifname "$iface" udp dport "$port" drop 2>/dev/null || true
+                add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop
+                add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop
             done
             # Only save our own tables, not incusd's managed 'incus' table
             { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
@@ -205,8 +258,8 @@ block_ports() {
         else
             # Final fallback: iptables with persistence
             for port in "${blocked_ports[@]}"; do
-                iptables --ipv4 -I FORWARD -o "$iface" -p tcp --dport "${port}" -j DROP 2>/dev/null || true
-                iptables --ipv4 -I FORWARD -o "$iface" -p udp --dport "${port}" -j DROP 2>/dev/null || true
+                add_iptables_drop_once "$iface" tcp "$port"
+                add_iptables_drop_once "$iface" udp "$port"
             done
             if command -v apt-get >/dev/null 2>&1; then
                 DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
@@ -224,14 +277,14 @@ block_ports() {
 
 download_scripts() {
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-        chmod 777 /usr/local/bin/ssh_bash.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_bash.sh
         dos2unix /usr/local/bin/ssh_bash.sh
     fi
     cp /usr/local/bin/ssh_bash.sh /root
     if [ ! -f /usr/local/bin/config.sh ]; then
-        curl -L https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
-        chmod 777 /usr/local/bin/config.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh || exit 1
+        chmod 755 /usr/local/bin/config.sh
         dos2unix /usr/local/bin/config.sh
     fi
     cp /usr/local/bin/config.sh /root
@@ -247,7 +300,7 @@ setup_container() {
         incus exec "$name" -- yum install -y curl
         incus exec "$name" -- apt-get install curl -y --fix-missing
         incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-        incus exec "$name" -- chmod 777 ChangeMirrors.sh
+        incus exec "$name" -- chmod 755 ChangeMirrors.sh
         incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
         incus exec "$name" -- rm -rf ChangeMirrors.sh
     fi
@@ -255,9 +308,9 @@ setup_container() {
     incus exec "$name" -- sudo apt-get install curl -y --fix-missing
     incus exec "$name" -- sudo apt-get install -y --fix-missing dos2unix
     incus file push /root/ssh_bash.sh "$name/root/"
-    incus exec "$name" -- chmod 777 ssh_bash.sh
+    incus exec "$name" -- chmod 755 ssh_bash.sh
     incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
+    incus exec "$name" -- ./ssh_bash.sh "$passwd"
     incus file push /root/config.sh "$name/root/"
     incus exec "$name" -- chmod +x config.sh
     incus exec "$name" -- dos2unix config.sh
@@ -308,8 +361,8 @@ create_containers() {
     for ((a = 1; a <= count; a++)); do
         local container_name="${base_name}${a}"
         local ssh_port=$((20000 + a))
-        local ori=$(date | md5sum)
-        local password=${ori:2:9}
+        local password
+        password="$(generate_password)"
         incus copy "$base_name" "$container_name"
         setup_container "$container_name" "$password" "$ssh_port"
     done

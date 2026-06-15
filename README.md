@@ -4,12 +4,36 @@
 
 ## 更新
 
-2026.06.02
+2026.06.04
 
-- 统一使用 export noninteractive=true 作为非交互模式入口
-- 修复安装、卸载、批量新增、swap、DNS与面板修改脚本的非交互和边界处理
+- 新增容器/虚拟机模板参数，支持 `web`、`db`、`dev`
+- 新增实例快照、备份、恢复、迁移和 macvlan 配置辅助脚本
+- 安装脚本同步分发 CT/VM 创建与运维辅助脚本，卸载脚本同步清理残留
 
 [更新日志](CHANGELOG.md)
+
+## 常用无交互入口 / Non-interactive helpers
+
+统一使用 `export noninteractive=true` 指定无需交互模式。
+
+Use `export noninteractive=true` for unattended runs.
+
+```bash
+export noninteractive=true
+export INCUS_TEMPLATE=web
+bash buildct.sh web1 1 512 5 20001 20002 20025 300 300 N debian12
+
+export INCUS_OP_ACTION=backup
+export INCUS_OP_INSTANCE=web1
+bash instance_ops.sh
+
+export INCUS_MACVLAN_ACTION=attach
+export INCUS_MACVLAN_INSTANCE=web1
+bash macvlan.sh
+
+export SWAP_ACTION=reset
+bash scripts/swap2.sh
+```
 
 ## 说明文档
 

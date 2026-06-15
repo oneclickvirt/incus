@@ -3,6 +3,34 @@
 # https://github.com/oneclickvirt/incus
 # 2026.02.28
 
+load_image_lookup() {
+    local script_path="${BASH_SOURCE[0]:-$0}"
+    local script_dir helper
+    script_dir="$(cd "$(dirname "$script_path")" >/dev/null 2>&1 && pwd)"
+    for helper in "$script_dir/image_lookup.sh" "/usr/local/bin/image_lookup.sh" "/root/image_lookup.sh"; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            return 0
+        fi
+    done
+    if command -v curl >/dev/null 2>&1; then
+        helper="/tmp/incus_image_lookup_$$.sh"
+        if curl -fsSLk "${cdn_success_url:-}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh" -o "$helper"; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            rm -f "$helper"
+            return 0
+        fi
+        rm -f "$helper"
+    fi
+    echo "Missing image_lookup.sh, please download it with this script."
+    echo "缺少 image_lookup.sh，请与当前脚本一起下载。"
+    exit 1
+}
+
+load_image_lookup
+
 
 check_vm_support() {
     echo "Checking if Incus supports virtual machines..."
@@ -12,7 +40,8 @@ check_vm_support() {
         echo "错误：Incus未安装或不在PATH中"
         exit 1
     fi
-    local drivers=$(incus info | grep -i "driver:")
+    local drivers
+    drivers=$(incus info | grep -i "driver:")
     echo "Available drivers: $drivers"
     echo "可用驱动: $drivers"
     if ! echo "$drivers" | grep -qi "qemu"; then
@@ -142,10 +171,24 @@ detect_os() {
 }
 
 install_dependencies() {
-    cd /root >/dev/null 2>&1
+    cd /root >/dev/null 2>&1 || exit 1
     if ! command -v jq; then
         $PACKAGETYPE_INSTALL jq
     fi
+}
+
+generate_password() {
+    local generated=""
+    if command -v openssl >/dev/null 2>&1; then
+        generated="$(openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 16)"
+    fi
+    if [ -z "$generated" ] && [ -r /dev/urandom ]; then
+        generated="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    fi
+    if [ -z "$generated" ]; then
+        generated="$(date +%s%N 2>/dev/null | sha256sum | cut -c 1-16)"
+    fi
+    echo "$generated"
 }
 
 check_china() {
@@ -160,7 +203,8 @@ check_china() {
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -236,8 +280,8 @@ get_kvm_images() {
         "https://githubapi.spiritlhl.workers.dev"
     )
     for api_url in "${api_urls[@]}"; do
-        local response=$(curl -4 -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images")
-        if [ $? -eq 0 ] && echo "$response" | jq -e '.assets' >/dev/null 2>&1; then
+        local response
+        if response=$(curl -4 -s -m 6 "${api_url}/repos/oneclickvirt/incus_images/releases/tags/kvm_images") && echo "$response" | jq -e '.assets' >/dev/null 2>&1; then
             echo "$response" | jq -r '.assets[].name'
             return 0
         fi
@@ -250,31 +294,25 @@ handle_image() {
     image_download_url=""
     fixed_system=false
     if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-        local kvm_images=($(get_kvm_images))
-        if [ ${#kvm_images[@]} -eq 0 ]; then
+        local image_name
+        local kvm_images
+        local target_images=()
+        local cloud_images=()
+        kvm_images="$(get_kvm_images | tr '[:space:]' '\n')"
+        if [ -z "$kvm_images" ]; then
             echo "Failed to get KVM images list"
             echo "获取KVM镜像列表失败"
             exit 1
         fi
-        local target_images=()
-        local cloud_images=()
-        for image_name in "${kvm_images[@]}"; do
-            if [ -z "${b}" ]; then
-                if [[ "$image_name" == "${a}"*"${sys_bit}"*"kvm.zip" ]]; then
-                    target_images+=("$image_name")
-                    if [[ "$image_name" == *"cloud"* ]]; then
-                        cloud_images+=("$image_name")
-                    fi
-                fi
-            else
-                if [[ "$image_name" == "${a}_${b}"*"${sys_bit}"*"kvm.zip" ]]; then
-                    target_images+=("$image_name")
-                    if [[ "$image_name" == *"cloud"* ]]; then
-                        cloud_images+=("$image_name")
-                    fi
+        while IFS= read -r image_name; do
+            [ -n "$image_name" ] || continue
+            if image_name_matches_system "$image_name" && [[ "$image_name" == *"${sys_bit}"*"kvm.zip" ]]; then
+                target_images+=("$image_name")
+                if [[ "$image_name" == *"cloud"* ]]; then
+                    cloud_images+=("$image_name")
                 fi
             fi
-        done
+        done <<< "$kvm_images"
         local selected_image=""
         if [ ${#cloud_images[@]} -gt 0 ]; then
             selected_image="${cloud_images[0]}"
@@ -311,7 +349,7 @@ import_image() {
         return 0
     fi
     retry_wget "${cdn_success_url}${image_url}" "$image_name"
-    chmod 777 "$image_name"
+    chmod 755 "$image_name"
     unzip "$image_name"
     rm -rf "$image_name"
     incus image import incus.tar.xz disk.qcow2 --alias "$short_alias"
@@ -320,25 +358,20 @@ import_image() {
 }
 
 check_standard_images() {
-    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "virtual-machine" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    status_tuna=false
+    system=$(find_remote_image_alias images virtual-machine)
     if [ -n "$system" ]; then
         echo "A matching image exists and will be created using images:${system}"
         echo "匹配的镜像存在，将使用 images:${system} 进行创建"
         fixed_system=false
         return
     fi
-    system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "virtual-machine" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
-    if [ $? -ne 0 ]; then
-        status_tuna=false
-    else
-        if echo "$system" | grep -q "${a}"; then
-            echo "A matching image exists and will be created using opsmaru:${system}"
-            echo "匹配的镜像存在，将使用 opsmaru:${system} 进行创建"
-            status_tuna=true
-            fixed_system=false
-        else
-            status_tuna=false
-        fi
+    system=$(find_remote_image_alias opsmaru virtual-machine)
+    if [ -n "$system" ]; then
+        echo "A matching image exists and will be created using opsmaru:${system}"
+        echo "匹配的镜像存在，将使用 opsmaru:${system} 进行创建"
+        status_tuna=true
+        fixed_system=false
     fi
     if [ -z "$image_download_url" ] && [ "$status_tuna" = false ]; then
         echo "No matching image found, please execute"
@@ -368,6 +401,23 @@ create_vm() {
     fi
 }
 
+normalize_template() {
+    template=$(echo "${template:-${INCUS_TEMPLATE:-}}" | tr '[:upper:]' '[:lower:]')
+}
+
+validate_template() {
+    normalize_template
+    case "$template" in
+    "" | none | web | db | database | dev | development)
+        ;;
+    *)
+        echo "Unknown template: $template"
+        echo "未知模板: $template"
+        exit 1
+        ;;
+    esac
+}
+
 configure_limits() {
     incus config set "$name" limits.cpu.priority 0
     incus config set "$name" limits.memory.swap true
@@ -380,9 +430,41 @@ configure_limits() {
     fi
 }
 
+set_optional_config() {
+    local key="$1"
+    local value="$2"
+    incus config set "$name" "$key" "$value" 2>/dev/null || true
+}
+
+apply_template() {
+    local selected_template="$template"
+    [ -z "$selected_template" ] && return 0
+    [ "$selected_template" = "none" ] && return 0
+
+    incus config set "$name" user.incus.template "$selected_template"
+    incus config set "$name" boot.autostart true
+    case "$selected_template" in
+    web)
+        set_optional_config limits.processes 2048
+        ;;
+    db | database)
+        set_optional_config limits.cpu.priority 5
+        set_optional_config limits.memory.swap false
+        set_optional_config limits.processes 4096
+        ;;
+    dev | development)
+        set_optional_config limits.processes 4096
+        ;;
+    *)
+        echo "Unknown template: $selected_template"
+        echo "未知模板: $selected_template"
+        exit 1
+        ;;
+    esac
+}
+
 setup_vm() {
-    ori=$(date | md5sum)
-    passwd=${ori:2:9}
+    passwd="$(generate_password)"
     incus start "$name"
     echo "Waiting for VM to start..."
     sleep 30
@@ -394,7 +476,7 @@ setup_vm() {
         fi
         sleep 10
     done
-    chmod 777 /usr/local/bin/check-dns.sh
+    chmod 755 /usr/local/bin/check-dns.sh
     /usr/local/bin/check-dns.sh
     sleep 3
     if [ "$fixed_system" = false ]; then
@@ -409,8 +491,8 @@ setup_mirror_and_packages() {
         incus exec "$name" -- yum install -y curl
         incus exec "$name" -- apt-get install curl -y --fix-missing
         incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-        incus exec "$name" -- chmod 777 ChangeMirrors.sh
-        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null > /dev/null
+        incus exec "$name" -- chmod 755 ChangeMirrors.sh
+        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips >/dev/null 2>&1
         incus exec "$name" -- rm -rf ChangeMirrors.sh
     fi
     if echo "$system" | grep -qiE "centos|almalinux|fedora|rocky|oracle"; then
@@ -438,18 +520,18 @@ setup_ssh() {
 
 setup_ssh_bash() {
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-        chmod 777 /usr/local/bin/ssh_bash.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh" -o /usr/local/bin/ssh_bash.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_bash.sh
         dos2unix /usr/local/bin/ssh_bash.sh
     fi
     cp /usr/local/bin/ssh_bash.sh /root
     incus file push /root/ssh_bash.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_bash.sh
+    incus exec "$name" -- chmod 755 ssh_bash.sh
     incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
+    incus exec "$name" -- ./ssh_bash.sh "$passwd"
     if [ ! -f /usr/local/bin/config.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
-        chmod 777 /usr/local/bin/config.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh" -o /usr/local/bin/config.sh || exit 1
+        chmod 755 /usr/local/bin/config.sh
         dos2unix /usr/local/bin/config.sh
     fi
     cp /usr/local/bin/config.sh /root
@@ -492,7 +574,8 @@ safe_shutdown_vm() {
     local max_shutdown_wait=30
     local waited=0
     while [ $waited -lt $max_shutdown_wait ]; do
-        local vm_status=$(incus info "$name" | grep "Status:" | awk '{print $2}')
+        local vm_status
+        vm_status=$(incus info "$name" | grep "Status:" | awk '{print $2}')
         if [ "$vm_status" = "STOPPED" ]; then
             echo "VM has been safely stopped"
             echo "虚拟机已安全停止"
@@ -534,10 +617,10 @@ configure_network() {
     echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
-            incus exec "$name" -- /bin/bash -c '(crontab -l 2>/dev/null; echo "*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb") | crontab -'
+            incus exec "$name" -- /bin/bash -c 'cron_line="*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb"; crontab -l 2>/dev/null | grep -Fqx "$cron_line" || (crontab -l 2>/dev/null; echo "$cron_line") | crontab -'
             sleep 1
             if [ ! -f "./build_ipv6_network.sh" ]; then
-                curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh
+                curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o build_ipv6_network.sh || exit 1
                 chmod +x build_ipv6_network.sh
             fi
             ./build_ipv6_network.sh "$name"
@@ -599,7 +682,6 @@ cleanup_and_finish() {
 }
 
 main() {
-    check_vm_support
     name="${1:-test}"
     cpu="${2:-1}"
     memory="${3:-512}"
@@ -612,8 +694,15 @@ main() {
     enable_ipv6="${10:-N}"
     enable_ipv6=$(echo "$enable_ipv6" | tr '[:upper:]' '[:lower:]')
     system="${11:-debian11}"
-    a="${system%%[0-9]*}"
-    b="${system##*[!0-9.]}"
+    template="${12:-${INCUS_TEMPLATE:-}}"
+    validate_template
+    check_vm_support
+    if ! normalize_image_system "$system"; then
+        echo "Invalid system input: $system"
+        echo "系统输入无效: $system"
+        exit 1
+    fi
+    system="$normalized_system"
     detect_os
     install_dependencies
     detect_arch
@@ -623,6 +712,7 @@ main() {
     handle_image
     create_vm
     configure_limits
+    apply_template
     setup_vm
     cleanup_and_finish
 }

@@ -184,7 +184,8 @@ set_ipv4_precedence_gai() {
 adjust_nmcli_ipv6_route_metric() {
     local CONN_NAME=$1
     echo "调整连接 $CONN_NAME 的 IPv6 路由 metric 以降低 IPv6 优先级"
-    local METRIC=$(nmcli connection show "$CONN_NAME" | grep '^ipv6.route-metric:' | awk '{print $2}')
+    local METRIC
+    METRIC=$(nmcli connection show "$CONN_NAME" | grep '^ipv6.route-metric:' | awk '{print $2}')
     if [ -z "$METRIC" ]; then
         METRIC=100
     fi
@@ -205,7 +206,8 @@ backup_resolv_conf() {
 
 check_resolv_conf_symlink() {
     if [ -L "/etc/resolv.conf" ]; then
-        local target=$(readlink /etc/resolv.conf)
+        local target
+        target=$(readlink /etc/resolv.conf)
         echo "/etc/resolv.conf 是软链接，指向 $target"
         # 检查是否指向 systemd-resolved 的 stub
         if [[ "$target" == *"systemd/resolve"* ]]; then
@@ -258,8 +260,10 @@ configure_systemd_resolved() {
         current_fallback_dns=$(grep "^FallbackDNS=" "$RESOLVED_CONF" | cut -d'=' -f2)
     fi
     
-    local new_dns=$(join " " "${dns_list[@]}")
-    local new_fallback_dns=$(join " " "${fallback_dns_list[@]}")
+    local new_dns
+    local new_fallback_dns
+    new_dns=$(join " " "${dns_list[@]}")
+    new_fallback_dns=$(join " " "${fallback_dns_list[@]}")
     
     # 如果当前配置与新配置相同，跳过
     if [ "$current_dns" = "$new_dns" ] && [ "$current_fallback_dns" = "$new_fallback_dns" ]; then
@@ -268,7 +272,8 @@ configure_systemd_resolved() {
     fi
     
     # 创建临时文件进行配置更新
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(mktemp)
     local updated=false
     local fallback_updated=false
     
@@ -293,7 +298,7 @@ configure_systemd_resolved() {
     # 如果没有找到 DNS= 行，添加到 [Resolve] 段落下
     if ! $updated; then
         # 重新处理文件，在 [Resolve] 段落后添加配置
-        > "$temp_file"  # 清空临时文件
+        : > "$temp_file"  # 清空临时文件
         local in_resolve_section=false
         local dns_added=false
         

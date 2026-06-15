@@ -1,5 +1,30 @@
 ### 更新日志
 
+2026.06.15
+
+- 修复 `add_more.sh` 批量新增容器时系统镜像校验过窄导致 `debian11`、`debian/11` 等输入被误判为无匹配镜像的问题
+- 统一 CT/VM/批量新增脚本的系统镜像输入解析和远端 alias 筛选，补充自建镜像源、`images:` 与 `opsmaru:` 回退路径的回归测试
+
+2026.06.04
+
+- 新增 `INCUS_TEMPLATE` / `INCUS_ADD_TEMPLATE`，容器和虚拟机创建支持 `web`、`db`、`dev` 模板配置
+- 新增 `instance_ops.sh`，支持实例快照、导出备份、导入恢复和远端迁移
+- 新增 `macvlan.sh`，支持 macvlan profile 创建、挂载、卸载和删除
+- 安装脚本同步下载并安装 CT/VM 创建脚本及运维辅助脚本，卸载脚本同步清理新增残留文件
+- 模板参数在创建实例前提前校验，`swap2.sh` 支持 `noninteractive=true` 与 `SWAP_ACTION`
+
+2026.06.03
+
+- 强化容器、虚拟机、批量创建和面板修改脚本的默认 SSH 密码生成逻辑
+- 修复默认密码传递未完整引用导致的边界问题
+- 修复卸载脚本未清理 incus 专用 nftables 表和非 eth0 默认出口端口屏蔽规则的问题
+- 修复 `pre_check.sh` 未启用 extglob 导致的 Bash 语法错误，并归一化 `ssh_bash.sh` 行尾
+- 修复安装、批量初始化、规则脚本和 IPv6 NAT 路径重复执行时可能重复添加防火墙规则的问题
+- 移除面板初始化脚本中重复覆盖的 `service_manager` 定义
+- 将脚本和下载文件权限从 `777` 收紧到 `755`，证书文件使用 `644`
+- 新增 `.gitignore`，排除本地环境、密钥、数据库、日志、PID 和截图类生成文件
+- 新增 Shell CI，包含 `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`、concurrency 和 job timeout
+
 2026.06.02
 
 - 统一使用 `export noninteractive=true` 作为非交互模式入口，并兼容旧环境变量

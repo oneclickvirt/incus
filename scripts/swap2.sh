@@ -3,11 +3,21 @@
 #./swap2.sh 内存大小(以MB计算)
 # 2023.06.29
 
-swapsize="$1"
+swapsize="${1:-${SWAP_SIZE:-}}"
 
 Green="\033[32m"
 Font="\033[0m"
 Red="\033[31m"
+
+is_noninteractive() {
+    case "${noninteractive:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    case "${INCUS_NONINTERACTIVE:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    esac
+    return 1
+}
 
 default_swap_size() {
     local mem_mb
@@ -90,6 +100,27 @@ del_swap() {
 main() {
     root_need
     ovz_no
+    if is_noninteractive; then
+        case "${SWAP_ACTION:-reset}" in
+        add|ADD|1)
+            add_swap
+            ;;
+        del|delete|DEL|DELETE|2)
+            del_swap
+            ;;
+        reset|RESET|3)
+            del_swap
+            sleep 1
+            add_swap
+            ;;
+        *)
+            echo -e "${Red}Invalid SWAP_ACTION, use add, del or reset.${Font}"
+            echo -e "${Red}SWAP_ACTION 无效，请使用 add、del 或 reset。${Font}"
+            exit 1
+            ;;
+        esac
+        return
+    fi
     echo -e "———————————————————————————————————————"
     echo -e "${Green}Linux VPS一键添加/删除swap脚本${Font}"
     echo -e "${Green}1、添加swap${Font}"

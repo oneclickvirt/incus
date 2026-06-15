@@ -1,0 +1,28 @@
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*password*
+*passwd*
+*secret*
+*token*
+
+# Runtime data and generated logs
+*.db
+*.sqlite
+*.sqlite3
+log
+*.log
+*.pid
+
+# Local screenshots and temporary artifacts
+*screenshot*
+screenshots/
+tmp/
+temp/

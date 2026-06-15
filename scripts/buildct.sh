@@ -3,6 +3,34 @@
 # https://github.com/oneclickvirt/incus
 # 2026.02.28
 
+load_image_lookup() {
+    local script_path="${BASH_SOURCE[0]:-$0}"
+    local script_dir helper
+    script_dir="$(cd "$(dirname "$script_path")" >/dev/null 2>&1 && pwd)"
+    for helper in "$script_dir/image_lookup.sh" "/usr/local/bin/image_lookup.sh" "/root/image_lookup.sh"; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            return 0
+        fi
+    done
+    if command -v curl >/dev/null 2>&1; then
+        helper="/tmp/incus_image_lookup_$$.sh"
+        if curl -fsSLk "${cdn_success_url:-}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh" -o "$helper"; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            rm -f "$helper"
+            return 0
+        fi
+        rm -f "$helper"
+    fi
+    echo "Missing image_lookup.sh, please download it with this script."
+    echo "缺少 image_lookup.sh，请与当前脚本一起下载。"
+    exit 1
+}
+
+load_image_lookup
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -104,10 +132,24 @@ detect_os() {
 }
 
 install_dependencies() {
-    cd /root >/dev/null 2>&1
+    cd /root >/dev/null 2>&1 || exit 1
     if ! command -v jq; then
         $PACKAGETYPE_INSTALL jq
     fi
+}
+
+generate_password() {
+    local generated=""
+    if command -v openssl >/dev/null 2>&1; then
+        generated="$(openssl rand -base64 24 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 16)"
+    fi
+    if [ -z "$generated" ] && [ -r /dev/urandom ]; then
+        generated="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+    fi
+    if [ -z "$generated" ]; then
+        generated="$(date +%s%N 2>/dev/null | sha256sum | cut -c 1-16)"
+    fi
+    echo "$generated"
 }
 
 check_china() {
@@ -122,7 +164,8 @@ check_china() {
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -193,37 +236,25 @@ handle_image() {
     image_download_url=""
     fixed_system=false
     if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
-        retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_all_images.txt"
-        self_fixed_images=(${_retry_result})
-        for image_name in "${self_fixed_images[@]}"; do
-            if [ -z "${b}" ]; then
-                if [[ "$image_name" == "${a}"* ]]; then
-                    fixed_system=true
-                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                    image_alias_output=$(incus image alias list)
-                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                        import_image "$image_name" "$image_download_url"
-                        echo "A matching image exists and will be created using ${image_download_url}"
-                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
-                    fi
-                    break
-                fi
-            else
-                if [[ "$image_name" == "${a}_${b}"* ]]; then
-                    fixed_system=true
-                    image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                    image_alias_output=$(incus image alias list)
-                    if [[ "$image_alias_output" != *"$image_name"* ]]; then
-                        import_image "$image_name" "$image_download_url"
-                        echo "A matching image exists and will be created using ${image_download_url}"
-                        echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
-                    fi
-                    break
+        if retry_curl "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_all_images.txt"; then
+            image_name=$(
+                printf '%s\n' "$_retry_result" |
+                    tr '[:space:]' '\n' |
+                    find_matching_image_from_stream
+            )
+            if [ -n "$image_name" ]; then
+                fixed_system=true
+                image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
+                image_alias_output=$(incus image alias list)
+                if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                    import_image "$image_name" "$image_download_url"
+                    echo "A matching image exists and will be created using ${image_download_url}"
+                    echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
                 fi
             fi
-        done
+        fi
     else
-        output=$(incus image list images:${a}/${b})
+        incus image list "images:$(remote_image_query)" >/dev/null 2>&1 || true
     fi
     if [ -z "$image_download_url" ]; then
         check_standard_images
@@ -234,7 +265,7 @@ import_image() {
     local image_name="$1"
     local image_url="$2"
     retry_wget "${cdn_success_url}${image_url}" "$image_name"
-    chmod 777 "$image_name"
+    chmod 755 "$image_name"
     unzip "$image_name"
     rm -rf "$image_name"
     incus image import incus.tar.xz rootfs.squashfs --alias "$image_name"
@@ -242,25 +273,20 @@ import_image() {
 }
 
 check_standard_images() {
-    system=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
+    status_tuna=false
+    system=$(find_remote_image_alias images container)
     if [ -n "$system" ]; then
         echo "A matching image exists and will be created using images:${system}"
         echo "匹配的镜像存在，将使用 images:${system} 进行创建"
         fixed_system=false
         return
     fi
-    system=$(incus image list opsmaru:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
-    if [ $? -ne 0 ]; then
-        status_tuna=false
-    else
-        if echo "$system" | grep -q "${a}"; then
-            echo "A matching image exists and will be created using opsmaru:${system}"
-            echo "匹配的镜像存在，将使用 opsmaru:${system} 进行创建"
-            status_tuna=true
-            fixed_system=false
-        else
-            status_tuna=false
-        fi
+    system=$(find_remote_image_alias opsmaru container)
+    if [ -n "$system" ]; then
+        echo "A matching image exists and will be created using opsmaru:${system}"
+        echo "匹配的镜像存在，将使用 opsmaru:${system} 进行创建"
+        status_tuna=true
+        fixed_system=false
     fi
     if [ -z "$image_download_url" ] && [ "$status_tuna" = false ]; then
         echo "No matching image found, please execute"
@@ -304,6 +330,23 @@ configure_storage() {
     :
 }
 
+normalize_template() {
+    template=$(echo "${template:-${INCUS_TEMPLATE:-}}" | tr '[:upper:]' '[:lower:]')
+}
+
+validate_template() {
+    normalize_template
+    case "$template" in
+    "" | none | web | db | database | dev | development)
+        ;;
+    *)
+        echo "Unknown template: $template"
+        echo "未知模板: $template"
+        exit 1
+        ;;
+    esac
+}
+
 configure_limits() {
     # IO - 注意：read 和 write 有两个指标（带宽和IOPS），需要分别设置
     # 但 incus 的 limits.read 和 limits.write 只能设置带宽或IOPS其中之一
@@ -320,12 +363,40 @@ configure_limits() {
     incus config set "$name" security.nesting true
 }
 
+apply_template() {
+    local selected_template="$template"
+    [ -z "$selected_template" ] && return 0
+    [ "$selected_template" = "none" ] && return 0
+
+    incus config set "$name" user.incus.template "$selected_template"
+    incus config set "$name" boot.autostart true
+    case "$selected_template" in
+    web)
+        incus config set "$name" security.nesting true
+        incus config set "$name" limits.processes 2048
+        ;;
+    db | database)
+        incus config set "$name" limits.cpu.priority 5
+        incus config set "$name" limits.memory.swap false
+        incus config set "$name" limits.processes 4096
+        ;;
+    dev | development)
+        incus config set "$name" security.nesting true
+        incus config set "$name" limits.processes 4096
+        ;;
+    *)
+        echo "Unknown template: $selected_template"
+        echo "未知模板: $selected_template"
+        exit 1
+        ;;
+    esac
+}
+
 setup_container() {
-    ori=$(date | md5sum)
-    passwd=${ori:2:9}
+    passwd="$(generate_password)"
     incus start "$name"
     sleep 3
-    chmod 777 /usr/local/bin/check-dns.sh
+    chmod 755 /usr/local/bin/check-dns.sh
     /usr/local/bin/check-dns.sh
     sleep 3
     if [ "$fixed_system" = false ]; then
@@ -340,8 +411,8 @@ setup_mirror_and_packages() {
         incus exec "$name" -- yum install -y curl
         incus exec "$name" -- apt-get install curl -y --fix-missing
         incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-        incus exec "$name" -- chmod 777 ChangeMirrors.sh
-        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null > /dev/null
+        incus exec "$name" -- chmod 755 ChangeMirrors.sh
+        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips >/dev/null 2>&1
         incus exec "$name" -- rm -rf ChangeMirrors.sh
     fi
     if echo "$system" | grep -qiE "centos|almalinux|fedora|rocky|oracle"; then
@@ -375,30 +446,30 @@ setup_ssh() {
 
 setup_ssh_sh() {
     if [ ! -f /usr/local/bin/ssh_sh.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh -o /usr/local/bin/ssh_sh.sh
-        chmod 777 /usr/local/bin/ssh_sh.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh" -o /usr/local/bin/ssh_sh.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_sh.sh
         dos2unix /usr/local/bin/ssh_sh.sh
     fi
     cp /usr/local/bin/ssh_sh.sh /root
     incus file push /root/ssh_sh.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_sh.sh
-    incus exec "$name" -- ./ssh_sh.sh ${passwd}
+    incus exec "$name" -- chmod 755 ssh_sh.sh
+    incus exec "$name" -- ./ssh_sh.sh "$passwd"
 }
 
 setup_ssh_bash() {
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh
-        chmod 777 /usr/local/bin/ssh_bash.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh" -o /usr/local/bin/ssh_bash.sh || exit 1
+        chmod 755 /usr/local/bin/ssh_bash.sh
         dos2unix /usr/local/bin/ssh_bash.sh
     fi
     cp /usr/local/bin/ssh_bash.sh /root
     incus file push /root/ssh_bash.sh "$name"/root/
-    incus exec "$name" -- chmod 777 ssh_bash.sh
+    incus exec "$name" -- chmod 755 ssh_bash.sh
     incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- sudo ./ssh_bash.sh $passwd
+    incus exec "$name" -- ./ssh_bash.sh "$passwd"
     if [ ! -f /usr/local/bin/config.sh ]; then
-        curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh
-        chmod 777 /usr/local/bin/config.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh" -o /usr/local/bin/config.sh || exit 1
+        chmod 755 /usr/local/bin/config.sh
         dos2unix /usr/local/bin/config.sh
     fi
     cp /usr/local/bin/config.sh /root
@@ -441,7 +512,8 @@ safe_shutdown_container() {
     local max_shutdown_wait=30
     local waited=0
     while [ $waited -lt $max_shutdown_wait ]; do
-        local container_status=$(incus info "$name" | grep "Status:" | awk '{print $2}')
+        local container_status
+        container_status=$(incus info "$name" | grep "Status:" | awk '{print $2}')
         if [ "$container_status" = "STOPPED" ]; then
             echo "Container has been safely stopped"
             echo "容器已安全停止"
@@ -480,10 +552,10 @@ configure_network() {
     echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
-            incus exec "$name" -- /bin/bash -c '(crontab -l 2>/dev/null; echo "*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb") | crontab -'
+            incus exec "$name" -- /bin/bash -c 'cron_line="*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb"; crontab -l 2>/dev/null | grep -Fqx "$cron_line" || (crontab -l 2>/dev/null; echo "$cron_line") | crontab -'
             sleep 1
             if [ ! -f "./build_ipv6_network.sh" ]; then
-                curl -L ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh -o build_ipv6_network.sh
+                curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o build_ipv6_network.sh || exit 1
                 chmod +x build_ipv6_network.sh
             fi
             ./build_ipv6_network.sh "$name"
@@ -557,8 +629,14 @@ main() {
     enable_ipv6="${10:-N}"
     enable_ipv6=$(echo "$enable_ipv6" | tr '[:upper:]' '[:lower:]')
     system="${11:-debian11}"
-    a="${system%%[0-9]*}"
-    b="${system##*[!0-9.]}"
+    template="${12:-${INCUS_TEMPLATE:-}}"
+    validate_template
+    if ! normalize_image_system "$system"; then
+        echo "Invalid system input: $system"
+        echo "系统输入无效: $system"
+        exit 1
+    fi
+    system="$normalized_system"
     detect_os
     install_dependencies
     detect_arch
@@ -568,6 +646,7 @@ main() {
     handle_image
     create_container
     configure_limits
+    apply_template
     setup_container
     cleanup_and_finish
 }

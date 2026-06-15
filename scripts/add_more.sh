@@ -4,11 +4,39 @@
 # 2026.02.28
 
 # cd /root
-red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(green "$1")" "$2"; }
+
+load_image_lookup() {
+    local script_path="${BASH_SOURCE[0]:-$0}"
+    local script_dir helper
+    script_dir="$(cd "$(dirname "$script_path")" >/dev/null 2>&1 && pwd)"
+    for helper in "$script_dir/image_lookup.sh" "/usr/local/bin/image_lookup.sh" "/root/image_lookup.sh"; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            return 0
+        fi
+    done
+    if command -v curl >/dev/null 2>&1; then
+        helper="/tmp/incus_image_lookup_$$.sh"
+        if curl -fsSLk "${cdn_success_url:-}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh" -o "$helper"; then
+            # shellcheck source=/dev/null
+            . "$helper"
+            rm -f "$helper"
+            return 0
+        fi
+        rm -f "$helper"
+    fi
+    echo "Missing image_lookup.sh, please download it with this script."
+    echo "缺少 image_lookup.sh，请与当前脚本一起下载。"
+    exit 1
+}
+
+load_image_lookup
 
 is_noninteractive() {
     case "${noninteractive:-}" in
@@ -43,7 +71,8 @@ fi
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -82,24 +111,34 @@ pre_check() {
         apt-get install dos2unix -y
     fi
     if [ ! -f ssh_bash.sh ]; then
-        curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh" -o ssh_bash.sh
-        chmod 777 ssh_bash.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh" -o ssh_bash.sh || exit 1
+        chmod 755 ssh_bash.sh
         dos2unix ssh_bash.sh
     fi
     if [ ! -f ssh_sh.sh ]; then
-        curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh" -o ssh_sh.sh
-        chmod 777 ssh_sh.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh" -o ssh_sh.sh || exit 1
+        chmod 755 ssh_sh.sh
         dos2unix ssh_sh.sh
     fi
     if [ ! -f config.sh ]; then
-        curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh" -o config.sh
-        chmod 777 config.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh" -o config.sh || exit 1
+        chmod 755 config.sh
         dos2unix config.sh
     fi
     if [ ! -f buildct.sh ]; then
-        curl -sLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildct.sh" -o buildct.sh
-        chmod 777 buildct.sh
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildct.sh" -o buildct.sh || exit 1
+        chmod 755 buildct.sh
         dos2unix buildct.sh
+    fi
+    if [ ! -f image_lookup.sh ]; then
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh" -o image_lookup.sh || exit 1
+        chmod 755 image_lookup.sh
+        dos2unix image_lookup.sh
+    fi
+    if [ ! -f build_ipv6_network.sh ]; then
+        curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o build_ipv6_network.sh || exit 1
+        chmod 755 build_ipv6_network.sh
+        dos2unix build_ipv6_network.sh
     fi
 }
 
@@ -112,7 +151,7 @@ check_log() {
             # echo "$line"
             last_line="$line"
         done <"$log_file"
-        last_line_array=($last_line)
+        read -r -a last_line_array <<< "$last_line"
         container_name="${last_line_array[0]}"
         ssh_port="${last_line_array[1]}"
         password="${last_line_array[2]}"
@@ -145,6 +184,7 @@ check_log() {
 }
 
 build_new_containers() {
+    template="${INCUS_ADD_TEMPLATE:-${INCUS_TEMPLATE:-}}"
     if is_noninteractive; then
         new_nums="${INCUS_ADD_NUMS:-1}"
         cpu_nums="${INCUS_ADD_CPU:-1}"
@@ -234,24 +274,49 @@ build_new_containers() {
     "ppc64le") sys_bit="ppc64le" ;;
     *) sys_bit="x86_64" ;;
     esac
+    container_system_available() {
+        local matched_image
+        if [[ "$sys_bit" == "x86_64" || "$sys_bit" == "arm64" ]]; then
+            matched_image=$(
+                curl -fsSLk -m 10 "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus_images/main/${sys_bit}_all_images.txt" 2>/dev/null |
+                    tr '[:space:]' '\n' |
+                    find_matching_image_from_stream
+            )
+            if [ -n "$matched_image" ]; then
+                return 0
+            fi
+        fi
+        matched_image="$(find_remote_image_alias images container)"
+        if [ -n "$matched_image" ]; then
+            return 0
+        fi
+        matched_image="$(find_remote_image_alias opsmaru container)"
+        [ -n "$matched_image" ]
+    }
     while true; do
         if ! is_noninteractive; then
-            green "What is the system of each container? (Note that the incoming parameter is the system name + version number, e.g. debian11, ubuntu20, centos7):"
-            reading "每个容器的系统是什么？(注意传入参数为系统名字+版本号，如：debian11、ubuntu20、centos7)：" system
+            green "What is the system of each container? (e.g. debian11, debian/11, ubuntu20, centos7):"
+            reading "每个容器的系统是什么？(如：debian11、debian/11、ubuntu20、centos7)：" system
         fi
-        a="${system%%[0-9]*}"
-        b="${system##*[!0-9.]}"
-        output=$(incus image list images:${a}/${b} --format=json | jq -r --arg ARCHITECTURE "$sys_bit" '.[] | select(.type == "container" and .architecture == $ARCHITECTURE) | .aliases[0].name' | head -n 1)
-        if echo "$output" | grep -q "${a}"; then
+        if ! normalize_image_system "$system"; then
+            yellow "Invalid input, please enter an existing system."
+            yellow "输入无效，请输入一个存在的系统"
+            if is_noninteractive; then
+                exit 1
+            fi
+            continue
+        fi
+        system="$normalized_system"
+        if container_system_available; then
             echo "Matching mirror exists"
             echo "匹配的镜像存在"
             break
         else
             echo "No matching image found, please execute"
-            echo "incus image list images:system name/version number"
+            echo "incus image list images:system/version_number OR incus image list opsmaru:system/version_number"
             echo "Check if the corresponding image exists"
             echo "未找到匹配的镜像，请执行"
-            echo "incus image list images:系统名字/版本号"
+            echo "incus image list images:系统/版本号 或 incus image list opsmaru:系统/版本号"
             echo "查询是否存在对应镜像"
             yellow "输入无效，请输入一个存在的系统"
             if is_noninteractive; then
@@ -270,7 +335,7 @@ build_new_containers() {
         ssh_port=$(($ssh_port + 1))
         public_port_start=$(($public_port_end + 1))
         public_port_end=$(($public_port_start + 24))
-        ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system"
+        ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system" "$template"
         cat "$container_name" >>log
         rm -rf "$container_name"
     done

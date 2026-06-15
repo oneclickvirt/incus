@@ -24,7 +24,7 @@
 #   INCUS_DISK_SIZE=50 bash incus_install.sh
 #   INCUS_STORAGE_PATH=/data/incus-storage INCUS_DISK_SIZE=80 bash incus_install.sh
 
-cd /root >/dev/null 2>&1
+cd /root >/dev/null 2>&1 || exit 1
 REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "FreeBSD")
 CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')" "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(uname -s)")
@@ -32,6 +32,8 @@ SYS="${CMD[0]}"
 export DEBIAN_FRONTEND=noninteractive
 TRIED_STORAGE_FILE="/usr/local/bin/incus_tried_storage"
 INSTALLED_STORAGE_FILE="/usr/local/bin/incus_installed_storage"
+TRIED_STORAGE=()
+INSTALLED_STORAGE=()
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 
 # 检测 sed 是否支持 -E 选项
@@ -102,10 +104,21 @@ init_env() {
     detect_os
 }
 
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+load_storage_state() {
+    TRIED_STORAGE=()
+    INSTALLED_STORAGE=()
+    if [ -f "$TRIED_STORAGE_FILE" ]; then
+        mapfile -t TRIED_STORAGE <"$TRIED_STORAGE_FILE"
+    fi
+    if [ -f "$INSTALLED_STORAGE_FILE" ]; then
+        mapfile -t INSTALLED_STORAGE <"$INSTALLED_STORAGE_FILE"
+    fi
+}
+
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 
 is_noninteractive() {
@@ -393,7 +406,8 @@ install_dependencies() {
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=()
+    mapfile -t shuffled_cdn_urls < <(shuf -e "${cdn_urls[@]}")
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "$cdn_url$o_url" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -603,12 +617,18 @@ get_available_space() {
 
 record_tried_storage() {
     local storage_type="$1"
-    echo "$storage_type" >>"$TRIED_STORAGE_FILE"
+    if ! is_storage_tried "$storage_type"; then
+        echo "$storage_type" >>"$TRIED_STORAGE_FILE"
+        TRIED_STORAGE+=("$storage_type")
+    fi
 }
 
 record_installed_storage() {
     local storage_type="$1"
-    echo "$storage_type" >>"$INSTALLED_STORAGE_FILE"
+    if ! is_storage_installed "$storage_type"; then
+        echo "$storage_type" >>"$INSTALLED_STORAGE_FILE"
+        INSTALLED_STORAGE+=("$storage_type")
+    fi
 }
 
 is_storage_tried() {
@@ -846,7 +866,8 @@ create_storage_pool_with_custom_path() {
             _yellow "检测到旧的循环文件，正在清理..."
             _yellow "Detected old loop file, cleaning up..."
             vgremove -f incus_vg 2>/dev/null || true
-            losetup -d $(losetup -j "$loop_file" | cut -d: -f1) 2>/dev/null || true
+            old_loop_dev="$(losetup -j "$loop_file" | cut -d: -f1)"
+            [ -n "$old_loop_dev" ] && losetup -d "$old_loop_dev" 2>/dev/null || true
             rm -f "$loop_file"
         fi
         _green "创建稀疏文件：$loop_file (${disk_nums}GB)..."
@@ -1287,7 +1308,11 @@ download_preconfigured_files() {
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildct.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildvm.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ops.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/macvlan.sh"
     )
     for file in "${files[@]}"; do
         filename=$(basename "$file")
@@ -1297,8 +1322,8 @@ download_preconfigured_files() {
         success=0
         while (( attempt <= max_attempts )); do
             echo "Downloading $filename (attempt $attempt)..."
-            if curl -sLk "${cdn_success_url}${file}" -o "$filename"; then
-                chmod 777 "$filename"
+            if curl -fsSLk "${cdn_success_url}${file}" -o "$filename"; then
+                chmod 755 "$filename"
                 dos2unix "$filename"
                 success=1
                 break
@@ -1356,9 +1381,9 @@ optimize_system() {
         sysctl -p "$SYSCTL_D_CONF" >/dev/null 2>&1 || true
     fi
     if [ -f "/etc/security/limits.conf" ]; then
-        grep -q "*          hard    nproc       unlimited" /etc/security/limits.conf || \
+        grep -Fq "*          hard    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
-        grep -q "*          soft    nproc       unlimited" /etc/security/limits.conf || \
+        grep -Fq "*          soft    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          soft    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
     fi
     if [ -f "/etc/systemd/logind.conf" ]; then
@@ -1435,6 +1460,28 @@ save_firewall_rules() {
     fi
 }
 
+nft_rule_exists() {
+    local family="$1"
+    local table="$2"
+    local chain="$3"
+    local pattern="$4"
+    nft list chain "$family" "$table" "$chain" 2>/dev/null | grep -F -- "$pattern" >/dev/null 2>&1
+}
+
+add_nft_rule_once() {
+    local family="$1"
+    local table="$2"
+    local chain="$3"
+    local pattern="$4"
+    shift 4
+    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || true
+}
+
+add_iptables_masq_once() {
+    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null ||
+        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
+}
+
 setup_iptables() {
     if command -v ufw >/dev/null 2>&1; then
         ufw allow in on incusbr0
@@ -1445,7 +1492,7 @@ setup_iptables() {
         # Use nftables for MASQUERADE (handles both IPv4 and IPv6)
         nft add table inet incus_masq 2>/dev/null || true
         nft add chain inet incus_masq postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-        nft add rule inet incus_masq postrouting oifname != "incusbr0" masquerade 2>/dev/null || true
+        add_nft_rule_once inet incus_masq postrouting 'oifname != "incusbr0" masquerade' oifname != "incusbr0" masquerade
         save_firewall_rules
     elif command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --zone=public --add-masquerade
@@ -1455,7 +1502,7 @@ setup_iptables() {
         # Fallback to iptables with persistence
         install_package iptables
         ensure_iptables_persistent
-        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
+        add_iptables_masq_once
         save_firewall_rules
     fi
 }
@@ -1487,17 +1534,22 @@ configure_uid_gid() {
       fi
     done
   done
-  safe_grep "^($(IFS="|"; echo "${USERS[*]}"))/" /etc/subuid /etc/subgid || true
+  safe_grep "^($(IFS="|"; echo "${USERS[*]}")):" /etc/subuid /etc/subgid || true
 }
 
 copy_scripts_to_system() {
-    cp /root/ssh_sh.sh /usr/local/bin
-    cp /root/ssh_bash.sh /usr/local/bin
-    cp /root/config.sh /usr/local/bin
+    local script
+    for script in ssh_sh.sh ssh_bash.sh config.sh image_lookup.sh buildct.sh buildvm.sh instance_ops.sh macvlan.sh; do
+        if [ -f "/root/$script" ]; then
+            cp "/root/$script" /usr/local/bin/
+            chmod 755 "/usr/local/bin/$script"
+        fi
+    done
 }
 
 main() {
     init_env
+    load_storage_state
     statistics_of_run_times
     install_dependencies
     rebuild_cloud_init

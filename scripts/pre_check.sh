@@ -3,10 +3,10 @@
 # 2023.06.29
 # 预检测本机是否符合开设容器的要求
 
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
 if [[ -z "$utf8_locale" ]]; then
     _yellow "No UTF-8 locale found"
@@ -59,14 +59,17 @@ openvz) VIRT='openvz' ;;
 incus) VIRT='incus' ;;
 *) VIRT='kvm' ;;
 esac
-if [[ $VIRT == @(openvz|incus) ]]; then
+case "$VIRT" in
+openvz|incus)
     _yellow "openvz or incus architecture cannot use this set of scripts, please use another virtualized server as a mother hen, such as KVM"
     _yellow "openvz或incus架构无法使用本套脚本，请使用别的虚拟化的服务器做母鸡，如KVM"
     exit 1
-else
+    ;;
+*)
     _green "This machine architecture meets the requirements"
     _green "本机架构符合要求"
-fi
+    ;;
+esac
 
 # 检查系统版本是否符合要求
 if [ -n "$(command -v lsb_release)" ]; then
@@ -77,14 +80,17 @@ else
     codename=$(cat /etc/*release | safe_grep '^VERSION_CODENAME=' | awk -F= '{ print $2 }' | tr -d \")
 fi
 
-if [[ ! $distro == @(Ubuntu|ubuntu|Debian|debian) ]]; then
+case "$distro" in
+Ubuntu|ubuntu|Debian|debian)
+    _green "This system meets the requirements"
+    _green "本机系统符合要求"
+    ;;
+*)
     _yellow "The local system does not meet the requirements, Ubuntu or Debian 8+ is required"
     _yellow "本机系统不符合要求，需要 Ubuntu 或 Debian 8+"
     exit 1
-else
-    _green "This system meets the requirements"
-    _green "本机系统符合要求"
-fi
+    ;;
+esac
 
 # 检查网络是否符合要求
 if ! ping -c 1 -w 6 raw.githubusercontent.com >/dev/null 2>&1; then
