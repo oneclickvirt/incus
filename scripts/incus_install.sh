@@ -16,6 +16,9 @@
 #   INCUS_DISK_SIZE=<GB>        存储池大小（正整数，单位 GB），如 50
 #                               Storage pool size in GB (positive integer), e.g. 50
 #
+#   INCUS_STORAGE_BACKEND=<type> 优先使用指定存储后端，可选 dir/btrfs/lvm/zfs/ceph
+#                               Preferred storage backend: dir/btrfs/lvm/zfs/ceph
+#
 #   WITHOUTCDN=true             跳过 CDN 加速，直连 GitHub
 #                               Skip CDN acceleration, connect to GitHub directly
 #
@@ -494,6 +497,26 @@ EOF
     apt install -y incus
 }
 
+ensure_debian_backports_repo() {
+    local codename="$1"
+    local suite="${codename}-backports"
+    local source_file="/etc/apt/sources.list.d/debian-${suite}.sources"
+
+    [ -n "$codename" ] || return 1
+    if grep -Rqs "^[[:space:]]*deb .*${suite}" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null ||
+        grep -Rqs "^[[:space:]]*Suites:.*${suite}" /etc/apt/sources.list.d 2>/dev/null; then
+        return 0
+    fi
+
+    cat <<EOF >"${source_file}"
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${suite}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+}
+
 install_incus() {
     if ! command -v incus >/dev/null 2>&1; then
         echo "未检测到 incus，开始自动安装... | incus not found, starting installation..."
@@ -522,8 +545,9 @@ install_incus() {
             else
                 if [[ "$VERSION_CODENAME" == "bookworm" ]]; then
                     echo "使用 Debian 12 (bookworm) 的 backports 包安装 incus | Installing incus from backports for Debian 12 (bookworm)"
-                    apt update
-                    apt install -y incus/bookworm-backports || install_via_zabbly
+                    ensure_debian_backports_repo "$VERSION_CODENAME"
+                    apt-get update
+                    apt-get install -y -t bookworm-backports incus || install_via_zabbly
                 else
                     echo "使用 Debian 原生 incus 包（适用于 testing/unstable） | Installing native incus package for Debian (testing/unstable)"
                     apt update
@@ -1198,9 +1222,21 @@ setup_storage() {
         fi
     fi
     local BACKENDS=()
-    if command -v apt >/dev/null; then
+    if [ -n "${INCUS_STORAGE_BACKEND:-}" ]; then
+        case "${INCUS_STORAGE_BACKEND}" in
+            dir|btrfs|lvm|zfs|ceph)
+                BACKENDS=("${INCUS_STORAGE_BACKEND}")
+                [ "${INCUS_STORAGE_BACKEND}" = "dir" ] || BACKENDS+=("dir")
+                ;;
+            *)
+                _yellow "Unsupported INCUS_STORAGE_BACKEND=${INCUS_STORAGE_BACKEND}, using automatic backend selection"
+                _yellow "不支持的 INCUS_STORAGE_BACKEND=${INCUS_STORAGE_BACKEND}，改用自动存储后端选择"
+                ;;
+        esac
+    fi
+    if [ "${#BACKENDS[@]}" -eq 0 ] && command -v apt >/dev/null; then
         BACKENDS=("btrfs" "lvm" "zfs" "ceph" "dir")
-    else
+    elif [ "${#BACKENDS[@]}" -eq 0 ]; then
         BACKENDS=("lvm" "zfs" "ceph" "dir")
     fi
     for backend in "${BACKENDS[@]}"; do
