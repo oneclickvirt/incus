@@ -573,70 +573,61 @@ check_cdn_file() {
     fi
 }
 
+# Check whether an IPv6 address is a usable GUA allocation source. Textual
+# prefix tests are unsafe because the same address may contain leading zeros.
+is_public_ipv6() {
+    local address="${1:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$address" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+
+global_unicast = ipaddress.IPv6Network("2000::/3")
+non_public = (
+    ipaddress.IPv6Network("2001::/32"),       # Teredo
+    ipaddress.IPv6Network("2001:2::/48"),     # benchmarking
+    ipaddress.IPv6Network("2001:10::/28"),    # ORCHID
+    ipaddress.IPv6Network("2001:20::/28"),    # ORCHIDv2
+    ipaddress.IPv6Network("2001:db8::/32"),   # documentation
+    ipaddress.IPv6Network("2002::/16"),       # 6to4
+    ipaddress.IPv6Network("3fff::/20"),       # documentation
+)
+usable = (
+    address in global_unicast
+    and address.is_global
+    and not address.is_private
+    and not address.is_multicast
+    and not any(address in prefix for prefix in non_public)
+)
+raise SystemExit(0 if usable else 1)
+PY
+}
+
 # 检查是否为私有IPv6地址
 is_private_ipv6() {
-    local address=$1
-    local temp="0"
-    if [[ ! -n $address ]]; then
-        temp="1"
-    fi
-    if [[ -n $address && $address != *":"* ]]; then
-        temp="2"
-    fi
-    if [[ $address == fe80:* ]]; then
-        temp="3"
-    fi
-    if [[ $address == fc00:* || $address == fd00:* ]]; then
-        temp="4"
-    fi
-    if [[ $address == 2001:db8* ]]; then
-        temp="5"
-    fi
-    if [[ $address == ::1 ]]; then
-        temp="6"
-    fi
-    if [[ $address == ::ffff:* ]]; then
-        temp="7"
-    fi
-    if [[ $address == 2002:* ]]; then
-        temp="8"
-    fi
-    if [[ $address == 2001:* ]]; then
-        temp="9"
-    fi
-    if [[ $address == fd42:* ]]; then
-        temp="10"
-    fi
-    if [ "$temp" -gt 0 ]; then
-        return 0
-    else
-        return 1
-    fi
+    ! is_public_ipv6 "${1:-}"
 }
 
 # 检查IPv6地址
 check_ipv6() {
-    local candidate response cache_file
+    local candidate cache_file normalized
     cache_file=$(state_file incus_check_ipv6)
-    candidate=$(ip -6 addr show 2>/dev/null | awk '$1 == "inet6" && $0 ~ /scope global/ {print $2; exit}' | cut -d '/' -f1)
-    if ! IPV6=$(normalize_ipv6_address "$candidate" 2>/dev/null); then
-        IPV6=""
-    fi
-    if is_private_ipv6 "$IPV6"; then
-        IPV6=""
-        API_NET=("ipv6.ip.sb" "https://ipget.net" "ipv6.ping0.cc" "https://api.my-ip.io/ip" "https://ipv6.icanhazip.com")
-        for p in "${API_NET[@]}"; do
-            response=$(curl -sLk6m8 "$p" 2>/dev/null) || response=""
-            if candidate=$(normalize_ipv6_address "$response" 2>/dev/null) && ! is_private_ipv6 "$candidate"; then
-                IPV6="$candidate"
-                break
-            fi
-            sleep 1
-        done
-    fi
+    IPV6=""
+    while IFS= read -r candidate; do
+        candidate=${candidate%/*}
+        if normalized=$(normalize_ipv6_address "$candidate" 2>/dev/null) && ! is_private_ipv6 "$normalized"; then
+            IPV6="$normalized"
+            break
+        fi
+    done < <(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}')
     if [ -z "$IPV6" ]; then
-        _red "Unable to detect one valid public IPv6 address" >&2
-        _red "无法识别单一有效的公网 IPv6 地址" >&2
+        _red "No locally bound public IPv6 address is available" >&2
+        _red "未检测到本机绑定的公网 IPv6 地址" >&2
         return 1
     fi
     write_atomic_scalar "$cache_file" "$IPV6"
@@ -861,6 +852,9 @@ setup_network_device_ipv6() {
         ip_network_gam=$(normalize_ipv6_interface "$ip_network_gam" 2>/dev/null) || return 1
     fi
     if [ -n "$ip_network_gam" ]; then
+        # Linux suppresses ordinary router advertisements after forwarding is
+        # enabled unless the uplink explicitly opts in. Keep SLAAC routes.
+        update_sysctl "net.ipv6.conf.${ipv6_network_name}.accept_ra=2"
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1"
         update_sysctl "net.ipv6.conf.all.forwarding=1"
         update_sysctl "net.ipv6.conf.all.proxy_ndp=1"

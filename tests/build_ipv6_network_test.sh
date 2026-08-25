@@ -20,16 +20,60 @@ cat >"$TMP_DIR/bin/rdisc6" <<'STUB'
 #!/usr/bin/env bash
 printf 'Prefix                   : 2001:db8:abcd::/64\n'
 STUB
-chmod +x "$TMP_DIR/bin/timeout" "$TMP_DIR/bin/rdisc6"
+cat >"$TMP_DIR/bin/ip" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${INCUS_TEST_NO_LOCAL_IPV6:-}" == "1" ]]; then
+    exit 0
+fi
+if [[ "${INCUS_TEST_LOCAL_ULA_FIRST:-}" == "1" ]]; then
+    printf '2: eth0    inet6 fd42::1/64 scope global\n'
+fi
+printf '2: eth0    inet6 2606:4700::1111/64 scope global\n'
+STUB
+cat >"$TMP_DIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf 'external IPv6 lookup invoked\n' >"${INCUS_TEST_CURL_MARKER:?}"
+exit 1
+STUB
+chmod +x "$TMP_DIR/bin/timeout" "$TMP_DIR/bin/rdisc6" "$TMP_DIR/bin/ip" "$TMP_DIR/bin/curl"
 
 export PATH="$TMP_DIR/bin:$PATH"
 export INCUS_STATE_DIR="$TMP_DIR/state"
 export ONECLICKVIRT_TESTING=1
-# shellcheck source=../scripts/build_ipv6_network.sh
+# shellcheck disable=SC1091 # The test sources the repository script through a computed path.
 . "$ROOT_DIR/scripts/build_ipv6_network.sh"
 
+# shellcheck disable=SC2034 # Read by functions loaded from build_ipv6_network.sh.
 GREP_EXTENDED=-E
+# shellcheck disable=SC2034 # Read by functions loaded from build_ipv6_network.sh.
 GREP_PERL_SUPPORT=false
+
+export INCUS_TEST_CURL_MARKER="$TMP_DIR/curl-called"
+export INCUS_TEST_LOCAL_ULA_FIRST=1
+check_ipv6 || fail "locally bound IPv6 was not accepted"
+[ "$IPV6" = "2606:4700::1111" ] || fail "local IPv6 = '$IPV6'"
+[ "$(cat "$TMP_DIR/state/incus_check_ipv6")" = "2606:4700::1111" ] || fail "local IPv6 was not persisted"
+[ ! -e "$INCUS_TEST_CURL_MARKER" ] || fail "check_ipv6 used an external address service"
+unset INCUS_TEST_LOCAL_ULA_FIRST
+if is_private_ipv6 "2606:4700::1111"; then
+    fail "a public 2606 IPv6 address was classified as private"
+fi
+if ! is_private_ipv6 "2001::"; then
+    fail "the compressed Teredo prefix was accepted as public"
+fi
+if ! is_private_ipv6 "fc12::1" || ! is_private_ipv6 "fe90::1" || ! is_private_ipv6 "fec0::1" || ! is_private_ipv6 "ff02::1" || ! is_private_ipv6 "2001:0000::1" || ! is_private_ipv6 "2001:0010::1"; then
+    fail "local, site-local, or multicast IPv6 was accepted as public"
+fi
+export INCUS_TEST_NO_LOCAL_IPV6=1
+if check_ipv6 >/dev/null 2>&1; then
+    fail "check_ipv6 accepted a host without a locally bound public IPv6 address"
+fi
+[ ! -e "$INCUS_TEST_CURL_MARKER" ] || fail "missing local IPv6 triggered an external lookup"
+unset INCUS_TEST_NO_LOCAL_IPV6
+
+if ! grep -Fq 'net.ipv6.conf.${ipv6_network_name}.accept_ra=2' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
+    fail "IPv6 forwarding must preserve router advertisements on the Incus uplink"
+fi
 
 # Reproduce the reported shape: cached terminal text, ANSI bytes, and the
 # scalar on separate lines. It must be rejected rather than whitespace-joined.
