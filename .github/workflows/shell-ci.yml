@@ -33,6 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/image_lookup_test.sh
+          bash tests/build_ipv6_network_test.sh
 
       - name: Check shell lint errors
         shell: bash
