@@ -212,6 +212,23 @@ fi
 # invent a /64 or bind ULA/documentation addresses as public mappings.
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/add-ipv6.sh"
+
+# A persisted mapping must remain bound to its original routed bridge after a
+# reboot, even if the physical NIC is the current default-route interface.
+printf '%s\n' vmbr2 >"$TMP_DIR/state/incus_ipv6_mapping_interface"
+# shellcheck disable=SC2329 # Called indirectly by get_interface.
+ip() {
+    case "$*" in
+    "link show dev vmbr2"|"link show dev eth0") return 0 ;;
+    "-6 route show default") printf '%s\n' 'default via fe80::1 dev eth0 proto ra metric 1024' ;;
+    *) command ip "$@" ;;
+    esac
+}
+assert_eq vmbr2 "$(get_interface)" "saved routed bridge wins over default route"
+rm -f "$TMP_DIR/state/incus_ipv6_mapping_interface"
+assert_eq eth0 "$(get_interface)" "IPv6 default-route fallback"
+unset -f ip
+
 printf '%s\n' 128 >"$TMP_DIR/state/incus_ipv6_mapping_prefix_len"
 assert_eq 128 "$(get_host_ipv6_prefixlen eth0)" "strict persisted /128 prefix"
 printf '%s\n' 64 128 >"$TMP_DIR/state/incus_ipv6_mapping_prefix_len"
