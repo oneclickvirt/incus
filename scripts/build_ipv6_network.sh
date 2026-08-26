@@ -1019,9 +1019,10 @@ setup_network_device_ipv6() {
         # Linux suppresses ordinary router advertisements after forwarding is
         # enabled unless the uplink explicitly opts in. Keep SLAAC routes.
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.accept_ra=2"
+        # Proxying is needed only on the actual uplink. Do not make unrelated
+        # bridges and interfaces inherit NDP proxy behavior.
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1"
         update_sysctl "net.ipv6.conf.all.forwarding=1"
-        update_sysctl "net.ipv6.conf.all.proxy_ndp=1"
         sysctl_path=$(which sysctl)
         ${sysctl_path} -p
         found_ipv6=""

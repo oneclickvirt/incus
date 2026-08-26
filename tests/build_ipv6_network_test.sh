@@ -103,6 +103,10 @@ unset -f ip
 if ! grep -Fq 'net.ipv6.conf.${ipv6_network_name}.accept_ra=2' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
     fail "IPv6 forwarding must preserve router advertisements on the Incus uplink"
 fi
+# shellcheck disable=SC2016 # The literal is the source-code contract under test.
+if grep -Fq 'net.ipv6.conf.all.proxy_ndp=1' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
+    fail "Incus must not enable NDP proxying globally"
+fi
 
 # Reproduce the reported shape: cached terminal text, ANSI bytes, and the
 # scalar on separate lines. It must be rejected rather than whitespace-joined.
