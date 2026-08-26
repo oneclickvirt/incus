@@ -1,6 +1,6 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
-# 2025.08.14
+# 2026.08.26
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -271,6 +271,178 @@ detect_primary_ipv6_iface() {
         return
     done
     echo "eth0"
+}
+
+# Resolve the interface that actually owns the selected global IPv6 address.
+# Do not assume that the first physical NIC is the IPv6 uplink: HE/6in4,
+# sit/vti/GRE and routed bridge deployments commonly terminate IPv6 elsewhere.
+ipv6_uplink_interface() {
+    local preferred="${1:-}" requested="${INCUS_IPV6_UPLINK:-}" iface fallback_iface raw cidr normalized network
+    if [ -n "$requested" ] && [[ "$requested" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; then
+        if [ -z "$preferred" ] || ip -o -6 addr show dev "$requested" scope global 2>/dev/null | grep -q .; then
+            printf '%s\n' "$requested"
+            return 0
+        fi
+    fi
+    if [ -n "$preferred" ]; then
+        # The same address can legitimately exist as a host /128 and on a
+        # delegated /38, /64 or /127 bridge. Prefer the interface whose
+        # connected CIDR still has an address available for the guest.
+        while read -r iface cidr; do
+            [ -n "$iface" ] && [ -n "$cidr" ] || continue
+            raw=${cidr%/*}
+            normalized=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
+            [ "$normalized" = "$preferred" ] || continue
+            fallback_iface="${fallback_iface:-$iface}"
+            network=$(ipv6_allocation_network "$cidr" 2>/dev/null || true)
+            if [ -n "$network" ] && ipv6_pool_has_extra_address "$network" "$normalized"; then
+                printf '%s\n' "$iface"
+                return 0
+            fi
+        done < <(ip -o -6 addr show scope global 2>/dev/null | awk '$4 ~ /^[^ ]+\/[0-9]+$/ {print $2, $4}')
+        [ -n "$fallback_iface" ] && { printf '%s\n' "$fallback_iface"; return 0; }
+    fi
+    iface=$(ip -6 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+    if [ -n "$iface" ] && ip -o -6 addr show dev "$iface" scope global 2>/dev/null | grep -q .; then
+        printf '%s\n' "$iface"
+        return 0
+    fi
+    # Prefer common tunnel names when the provider has no default route yet.
+    while IFS= read -r iface; do
+        case "$iface" in
+        he-ipv6 | sit* | ip6tnl* | 6in4* | vti* | gre*)
+            if ip -o -6 addr show dev "$iface" scope global 2>/dev/null | grep -q .; then
+                printf '%s\n' "$iface"
+                return 0
+            fi
+            ;;
+        esac
+    done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
+    iface=$(detect_primary_ipv6_iface)
+    [ -n "$iface" ] || return 1
+    printf '%s\n' "$iface"
+}
+
+select_ipv6_interface() {
+    local preferred_address="${1:-}" candidates="${2:-}"
+    ! has_unsafe_scalar_chars "$preferred_address" || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$preferred_address" "$candidates" <<'PY'
+import ipaddress
+import sys
+
+preferred = sys.argv[1].strip()
+values = []
+for raw in sys.argv[2].splitlines():
+    try:
+        interface = ipaddress.ip_interface(raw.strip())
+    except ValueError:
+        continue
+    if interface.version != 6:
+        continue
+    if preferred and interface.ip.compressed == preferred:
+        print(interface.with_prefixlen)
+        raise SystemExit(0)
+    values.append(interface)
+if values:
+    print(values[0].with_prefixlen)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+ipv6_uplink_cidr() {
+    local iface="$1" preferred="${2:-}" raw
+    [ -n "$iface" ] || return 1
+    raw=$(ip -o -6 addr show dev "$iface" scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}')
+    select_ipv6_interface "$preferred" "$raw"
+}
+
+# A host /128 is a single address, not an address pool.  Conversely, a
+# routed/on-link /64, /38 or /127 may provide one or more additional addresses
+# when the upstream supports NDP/routing.  Keep this arithmetic independent of
+# hextet boundaries so non-nibble prefixes are handled correctly.
+ipv6_allocation_network() {
+    local detected="${1:-}" requested="${INCUS_IPV6_ROUTED_PREFIX:-}" value
+    value="${requested:-$detected}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$value" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1].strip(), strict=False)
+except ValueError:
+    raise SystemExit(1)
+if network.version != 6 or network.prefixlen > 127:
+    raise SystemExit(1)
+if not network.subnet_of(ipaddress.IPv6Network("2000::/3")):
+    raise SystemExit(1)
+print(network.with_prefixlen)
+PY
+}
+
+ipv6_pool_has_extra_address() {
+    local network="$1" excluded="${2:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$network" "$excluded" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1].strip(), strict=False)
+    excluded = ipaddress.IPv6Address(sys.argv[2]) if sys.argv[2] else None
+except ValueError:
+    raise SystemExit(1)
+if network.prefixlen > 127:
+    raise SystemExit(1)
+available = network.num_addresses - (1 if excluded is not None and excluded in network else 0)
+raise SystemExit(0 if available > 0 else 1)
+PY
+}
+
+disable_legacy_link_local_cleanup() {
+    local legacy="${INCUS_LEGACY_FE80_CLEANUP:-/usr/local/bin/remove_route.sh}" current
+    [ -f "$legacy" ] || return 0
+    # Only touch the two-line helper generated by older versions of this
+    # repository; an administrator script containing a similar command must
+    # remain untouched.
+    awk '
+        BEGIN { commands = 0; valid = 1 }
+        /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
+        /^[[:space:]]*ip([[:space:]]+-6)?[[:space:]]+addr[[:space:]]+del[[:space:]]+fe80:[0-9A-Fa-f:]+(\/[0-9]+)?[[:space:]]+dev[[:space:]]+[A-Za-z0-9_.:-]+[[:space:]]*$/ { commands++; next }
+        { valid = 0 }
+        END { exit !(valid && commands == 1) }
+    ' "$legacy" || return 0
+    if command -v crontab >/dev/null 2>&1; then
+        current=$(crontab -l 2>/dev/null || true)
+        if printf '%s\n' "$current" | grep -Fq "$legacy"; then
+            printf '%s\n' "$current" |
+                awk -v path="$legacy" '{ line = $0; sub(/^[[:space:]]*@reboot[[:space:]]+/, "", line); if (line != path) print }' |
+                crontab - 2>/dev/null || true
+        fi
+    fi
+    rm -f -- "$legacy"
+}
+
+configure_ipv6_nat66_fallback() {
+    local network="${INCUS_IPV6_NETWORK:-incusbr0}" parent current existing_mode
+    if command -v incus >/dev/null 2>&1 && [ -n "${CONTAINER_NAME:-}" ]; then
+        parent=$(incus config device get "$CONTAINER_NAME" eth0 parent 2>/dev/null || true)
+        [[ "$parent" =~ ^[A-Za-z0-9_.:-]+$ ]] && network="$parent"
+        current=$(incus network get "$network" ipv6.address 2>/dev/null || true)
+        if [ -z "$current" ] || [ "$current" = "none" ]; then
+            incus network set "$network" ipv6.address auto 2>/dev/null || true
+        fi
+        incus network set "$network" ipv6.nat true 2>/dev/null || true
+    fi
+    existing_mode=$(cat "$(state_file incus_ipv6_mode)" 2>/dev/null || true)
+    if [ "$existing_mode" != routed ] && [ "$existing_mode" != public-nat ] &&
+        [ ! -s "$(state_file incus_ipv6_mapping_interface)" ]; then
+        write_atomic_scalar "$(state_file incus_ipv6_mode)" nat66 2>/dev/null || true
+    fi
+    _yellow "No additional routed IPv6 address is available; retaining the container IPv6 network and enabling NAT66 where supported."
+    _yellow "宿主机没有可分配的额外公网 IPv6；保留容器 IPv6 网络，并在支持时启用 NAT66。"
 }
 
 # 设置环境变量
@@ -615,22 +787,32 @@ is_private_ipv6() {
 
 # 检查IPv6地址
 check_ipv6() {
-    local candidate cache_file normalized
+    local candidate cache_file normalized prefix fallback network
     cache_file=$(state_file incus_check_ipv6)
     IPV6=""
+    fallback=""
     while IFS= read -r candidate; do
+        prefix="${candidate##*/}"
         candidate=${candidate%/*}
         if normalized=$(normalize_ipv6_address "$candidate" 2>/dev/null) && ! is_private_ipv6 "$normalized"; then
-            IPV6="$normalized"
-            break
+            fallback="${fallback:-$normalized}"
+            # Do not let a host-only /128 shadow a usable delegated prefix on
+            # another bridge that carries the same address.
+            if network=$(ipv6_allocation_network "${normalized}/${prefix}" 2>/dev/null) &&
+                ipv6_pool_has_extra_address "$network" "$normalized"; then
+                IPV6="$normalized"
+                break
+            fi
         fi
     done < <(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}')
+    [ -n "$IPV6" ] || IPV6="$fallback"
     if [ -z "$IPV6" ]; then
         _red "No locally bound public IPv6 address is available" >&2
         _red "未检测到本机绑定的公网 IPv6 地址" >&2
         return 1
     fi
     write_atomic_scalar "$cache_file" "$IPV6"
+    printf '%s\n' "$IPV6"
 }
 
 # 更新sysctl配置
@@ -813,45 +995,27 @@ setup_network_device_ipv6() {
     else
         install_package sipcalc
     fi
-    # 安装 rdisc6 工具用于从路由器获取真实的 IPv6 前缀长度
-    install_rdisc6
     local ipv6_cache network_cidr host_ipv6 candidate found_ipv6
     ipv6_cache=$(state_file incus_check_ipv6)
     if ! IPV6=$(read_strict_ipv6_file "$ipv6_cache" 2>/dev/null); then
         check_ipv6 || return 1
         IPV6=$(read_strict_ipv6_file "$ipv6_cache" 2>/dev/null) || return 1
     fi
-    if ip -f inet6 addr | grep -q "he-ipv6"; then
-        ipv6_network_name="he-ipv6"
-        # 使用通用前缀模式匹配任意有效的 IPv6 前缀长度（1-128），而非仅匹配特定值
-        ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | grep -E "^${IPV6}/[0-9]+" | head -n 1 2>/dev/null)
-        if [ -z "$ip_network_gam" ]; then
-            # 如果精确匹配失败，回退到宿主机上该接口的第一个全局地址
-            ip_network_gam=$(ip -6 addr show ${ipv6_network_name} | grep global | awk '{print $2}' | head -n 1)
-        fi
-    else
-        ipv6_network_name=$(detect_primary_ipv6_iface)
-        ip_network_gam=$(ip -6 addr show "$ipv6_network_name" | grep global | awk '{print $2}' | head -n 1)
-    fi
+    ipv6_network_name=$(ipv6_uplink_interface "$IPV6" 2>/dev/null || true)
+    ip_network_gam=$(ipv6_uplink_cidr "$ipv6_network_name" "$IPV6" 2>/dev/null || true)
     _yellow "Local IPV6 address: $ip_network_gam"
-    # 尝试从路由器获取真实的 IPv6 前缀长度
     if [ -n "$ip_network_gam" ] && [ -n "$ipv6_network_name" ]; then
         if ! ip_network_gam=$(normalize_ipv6_interface "$ip_network_gam" 2>/dev/null); then
             _red "Local IPv6 interface value is invalid" >&2
             return 1
         fi
-        current_prefixlen=${ip_network_gam##*/}
-        real_prefixlen=$(get_real_ipv6_prefixlen_from_router "$ipv6_network_name" "$current_prefixlen") || return 1
-        # 如果获取到真实前缀长度，并且与当前前缀长度不同，则使用真实前缀长度
-        if [ -n "$real_prefixlen" ] && [ "$real_prefixlen" != "$current_prefixlen" ]; then
-            ipv6_addr_only=$(echo "$ip_network_gam" | cut -d'/' -f1)
-            ip_network_gam="${ipv6_addr_only}/${real_prefixlen}"
-            _green "Updated IPv6 address with real prefix from router: $ip_network_gam"
-            _green "使用从路由器获取的真实前缀更新 IPv6 地址: $ip_network_gam"
-        fi
-        ip_network_gam=$(normalize_ipv6_interface "$ip_network_gam" 2>/dev/null) || return 1
+        # The kernel-advertised CIDR is authoritative for allocation.  Router
+        # advertisements are diagnostic only; replacing a host /128 with an
+        # RA /64 would incorrectly manufacture a public address pool.
+        network_cidr=$(ipv6_allocation_network "$ip_network_gam" 2>/dev/null || true)
+        host_ipv6=$(normalize_ipv6_address "${ip_network_gam%/*}" 2>/dev/null || true)
     fi
-    if [ -n "$ip_network_gam" ]; then
+    if [ -n "${network_cidr:-}" ] && [ -n "${host_ipv6:-}" ] && ipv6_pool_has_extra_address "$network_cidr" "$host_ipv6"; then
         # Linux suppresses ordinary router advertisements after forwarding is
         # enabled unless the uplink explicitly opts in. Keep SLAAC routes.
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.accept_ra=2"
@@ -860,8 +1024,6 @@ setup_network_device_ipv6() {
         update_sysctl "net.ipv6.conf.all.proxy_ndp=1"
         sysctl_path=$(which sysctl)
         ${sysctl_path} -p
-        network_cidr=$(normalize_ipv6_network "$ip_network_gam" 2>/dev/null) || return 1
-        host_ipv6=$(normalize_ipv6_address "${ip_network_gam%/*}" 2>/dev/null) || return 1
         found_ipv6=""
         while IFS= read -r candidate; do
             [ "$candidate" = "$host_ipv6" ] && continue
@@ -893,18 +1055,11 @@ setup_network_device_ipv6() {
             ufw reload
         fi
         incus start "$container_name"
-        if [[ "${ipv6_gateway_fe80}" == "N" ]]; then
-            inter=$(detect_primary_ipv6_iface)
-            del_ip=$(ip -6 addr show dev "$inter" | awk '/inet6 fe80/ {print $2}')
-            if [ -n "$del_ip" ]; then
-                ip addr del "$del_ip" dev "$inter"
-                echo '#!/bin/bash' >/usr/local/bin/remove_route.sh
-                echo "ip addr del ${del_ip} dev ${inter}" >>/usr/local/bin/remove_route.sh
-                chmod 755 /usr/local/bin/remove_route.sh
-                if ! crontab -l 2>/dev/null | grep -Fq '/usr/local/bin/remove_route.sh'; then
-                    (crontab -l 2>/dev/null; echo '@reboot /usr/local/bin/remove_route.sh') | crontab -
-                fi
-            fi
+        # A link-local address is required for RA/NDP and must never be
+        # deleted merely because the default route uses a global gateway.
+        disable_legacy_link_local_cleanup
+        if [[ "$ipv6_gateway_fe80" == "Y" ]]; then
+            _blue "Retaining the link-local IPv6 gateway on ${ipv6_network_name}."
         fi
         local cron_line
         cron_line='*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb'
@@ -912,6 +1067,12 @@ setup_network_device_ipv6() {
             (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
         fi
         echo "$incus_ipv6" >>"$container_name"_v6
+        write_atomic_scalar "$(state_file incus_ipv6_mode)" routed || true
+    else
+        _red "The selected IPv6 prefix has no additional address (a /128 host route is not a pool)." >&2
+        _red "所选 IPv6 前缀没有可分配的额外地址（宿主 /128 不是地址池）。" >&2
+        configure_ipv6_nat66_fallback
+        return 0
     fi
 }
 
@@ -921,6 +1082,14 @@ setup_iptables_ipv6() {
     local subnet_prefix=$3
     local ipv6_length=$4
     local interface=$5
+    if ! subnet_prefix=$(ipv6_allocation_network "$subnet_prefix" 2>/dev/null); then
+        configure_ipv6_nat66_fallback
+        return 0
+    fi
+    if ! ipv6_pool_has_extra_address "$subnet_prefix" "${IPV6:-}"; then
+        configure_ipv6_nat66_fallback
+        return 0
+    fi
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
     check_cdn_file
     # Try to ensure nftables is available
@@ -967,6 +1136,9 @@ setup_iptables_ipv6() {
         exit 1
     fi
     valid_prefix_length "$ipv6_length" || return 1
+    write_atomic_scalar "$(state_file incus_ipv6_mapping_interface)" "$interface" || return 1
+    write_atomic_scalar "$(state_file incus_ipv6_mapping_prefix_len)" "$ipv6_length" || return 1
+    write_atomic_scalar "$(state_file incus_ipv6_mode)" public-nat || return 1
     ip -6 addr replace "$IPV6"/"$ipv6_length" dev "$interface" || return 1
     if [ "$use_nft" = true ]; then
         # Use nftables for IPv6 DNAT (handles v6 natively)
@@ -1028,6 +1200,7 @@ setup_iptables_ipv6() {
 }
 
 main() {
+    disable_legacy_link_local_cleanup
     CONTAINER_NAME="$1"
     use_iptables="${2:-N}"
     use_iptables=$(echo "$use_iptables" | tr '[:upper:]' '[:lower:]')
@@ -1039,10 +1212,15 @@ main() {
     install_package net-tools
     install_package cron
     install_package python3
-    interface=$(detect_primary_ipv6_iface)
+    if ! IPV6=$(check_ipv6 2>/dev/null); then
+        configure_ipv6_nat66_fallback
+        return 0
+    fi
+    interface=$(ipv6_uplink_interface "$IPV6" 2>/dev/null || true)
     if [ -z "$interface" ] || has_unsafe_scalar_chars "$interface" || [[ ! "$interface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; then
         _red "Unable to detect one valid network interface" >&2
-        exit 1
+        configure_ipv6_nat66_fallback
+        return 0
     fi
     _yellow "NIC $interface"
     _yellow "网卡 $interface"
@@ -1050,24 +1228,17 @@ main() {
     sleep 3
     wait_for_container_running "$CONTAINER_NAME"
     if ! CONTAINER_IPV6=$(get_container_ipv6 "$CONTAINER_NAME"); then
-        exit 1
+        configure_ipv6_nat66_fallback
+        return 0
     fi
-    ipv6_address=$(ip -6 addr show dev "$interface" 2>/dev/null | awk '$1 == "inet6" && $0 ~ /scope global/ {print $2; exit}')
+    ipv6_address=$(ipv6_uplink_cidr "$interface" "$IPV6" 2>/dev/null || true)
     ipv6_address=$(normalize_ipv6_interface "$ipv6_address" 2>/dev/null) || {
         _red "Unable to detect one valid host IPv6 interface address" >&2
-        exit 1
+        configure_ipv6_nat66_fallback
+        return 0
     }
     if [[ $ipv6_address == */* ]]; then
         ipv6_length=$(echo "$ipv6_address" | awk -F '/' '{ print $2 }')
-        # 尝试从路由器获取真实的 IPv6 前缀长度
-        real_ipv6_length=$(get_real_ipv6_prefixlen_from_router "$interface" "$ipv6_length") || exit 1
-        if [ -n "$real_ipv6_length" ] && [ "$real_ipv6_length" != "$ipv6_length" ]; then
-            _yellow "Current interface IPv6 prefix: /$ipv6_length, Real prefix from router: /$real_ipv6_length"
-            _yellow "当前接口 IPv6 前缀: /$ipv6_length, 从路由器获取的真实前缀: /$real_ipv6_length"
-            ipv6_length="$real_ipv6_length"
-            ipv6_addr_only=$(echo "$ipv6_address" | cut -d'/' -f1)
-            ipv6_address="${ipv6_addr_only}/${ipv6_length}"
-        fi
         valid_prefix_length "$ipv6_length" || exit 1
         ipv6_address=$(normalize_ipv6_interface "$ipv6_address" 2>/dev/null) || exit 1
         _green "subnet size: $ipv6_length"
@@ -1077,14 +1248,16 @@ main() {
         _green "查询不到IPV6的子网大小"
         exit 1
     fi
-    if ! SUBNET_PREFIX=$(get_host_ipv6_prefix "$ipv6_address"); then
-        exit 1
+    if ! SUBNET_PREFIX=$(ipv6_allocation_network "$ipv6_address" 2>/dev/null) ||
+        ! ipv6_pool_has_extra_address "$SUBNET_PREFIX" "${ipv6_address%/*}"; then
+        configure_ipv6_nat66_fallback
+        return 0
     fi
     ipv6_gateway_fe80=$(get_ipv6_gateway_info)
     if [[ $use_iptables == n ]]; then
-        setup_network_device_ipv6 "$CONTAINER_NAME" "$CONTAINER_IPV6" "$ipv6_gateway_fe80"
+        setup_network_device_ipv6 "$CONTAINER_NAME" "$CONTAINER_IPV6" "$ipv6_gateway_fe80" || return 1
     else
-        setup_iptables_ipv6 "$CONTAINER_NAME" "$CONTAINER_IPV6" "$SUBNET_PREFIX" "$ipv6_length" "$interface"
+        setup_iptables_ipv6 "$CONTAINER_NAME" "$CONTAINER_IPV6" "$SUBNET_PREFIX" "$ipv6_length" "$interface" || return 1
     fi
 }
 

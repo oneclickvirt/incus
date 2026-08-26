@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)"
-# shellcheck source=../scripts/image_lookup.sh
+# shellcheck disable=SC1091 # The test sources the function library through a computed repository path.
 . "$ROOT_DIR/scripts/image_lookup.sh"
 
 fail() {
@@ -16,8 +16,11 @@ assert_normalized() {
     local expected_version="$3"
     local expected_normalized="$4"
     normalize_image_system "$input" || fail "normalize_image_system rejected $input"
+    # shellcheck disable=SC2154 # These globals are deliberately populated by normalize_image_system.
     [ "$a" = "$expected_family" ] || fail "$input family: got $a, want $expected_family"
+    # shellcheck disable=SC2154 # These globals are deliberately populated by normalize_image_system.
     [ "$b" = "$expected_version" ] || fail "$input version: got $b, want $expected_version"
+    # shellcheck disable=SC2154 # This global is deliberately populated by normalize_image_system.
     [ "$normalized_system" = "$expected_normalized" ] || fail "$input normalized: got $normalized_system, want $expected_normalized"
 }
 
