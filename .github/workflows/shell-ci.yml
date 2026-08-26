@@ -24,9 +24,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          while IFS= read -r file; do
+          mapfile -d '' shell_files < <(
+            find scripts panel_scripts extra_scripts tests \
+              -type f -name '*.sh' -print0 | sort -z
+          )
+          ((${#shell_files[@]} > 0)) || exit 0
+          for file in "${shell_files[@]}"; do
             bash -n "$file"
-          done < <(find scripts panel_scripts extra_scripts tests -type f -name '*.sh' -print | sort)
+          done
 
       - name: Run shell tests
         shell: bash
@@ -39,4 +44,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shellcheck -S error $(find scripts panel_scripts extra_scripts tests -type f -name '*.sh' -print | sort)
+          mapfile -d '' shell_files < <(
+            find scripts panel_scripts extra_scripts tests \
+              -type f -name '*.sh' -print0 | sort -z
+          )
+          ((${#shell_files[@]} > 0)) || exit 0
+          shellcheck -S error -- "${shell_files[@]}"
