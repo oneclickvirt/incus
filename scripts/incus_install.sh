@@ -1,6 +1,6 @@
 #!/bin/bash
 # by https://github.com/oneclickvirt/incus
-# 2025.11.10
+# 2026.08.30
 #
 # 支持以下环境变量实现一键非交互式安装 / Supported env vars for non-interactive one-click install:
 #
@@ -35,9 +35,67 @@ SYS="${CMD[0]}"
 export DEBIAN_FRONTEND=noninteractive
 TRIED_STORAGE_FILE="/usr/local/bin/incus_tried_storage"
 INSTALLED_STORAGE_FILE="/usr/local/bin/incus_installed_storage"
+STORAGE_POOL_FILE="/usr/local/bin/incus_storage_pool"
+MANAGED_STORAGE_POOL="oneclickvirt"
 TRIED_STORAGE=()
 INSTALLED_STORAGE=()
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
+
+# Never replace an existing pool. It may own user instances, custom volumes,
+# and the root device referenced by the default profile.
+storage_pool_exists() {
+    local pool_name="${1:-default}"
+    incus storage show "$pool_name" >/dev/null 2>&1
+}
+
+valid_storage_pool_name() {
+    [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+}
+
+active_storage_pool() {
+    local pool_name=""
+    if [ -r "$STORAGE_POOL_FILE" ]; then
+        IFS= read -r pool_name <"$STORAGE_POOL_FILE" || true
+        if valid_storage_pool_name "$pool_name" && storage_pool_exists "$pool_name"; then
+            printf '%s\n' "$pool_name"
+            return 0
+        fi
+    fi
+    if storage_pool_exists default; then
+        printf '%s\n' default
+        return 0
+    fi
+    return 1
+}
+
+record_storage_pool() {
+    local pool_name="$1"
+    valid_storage_pool_name "$pool_name" || return 1
+    printf '%s\n' "$pool_name" >"$STORAGE_POOL_FILE"
+}
+
+# A fresh Incus daemon must be initialized before storage pools can be
+# created. The automatic initializer may create default; keep that pool and
+# use a separate recorded pool for this installer's custom storage path.
+initialize_custom_storage_pool() {
+    local backend="$1"
+    if ! incus admin init --auto; then
+        _red "Incus 初始化失败，无法创建自定义存储池"
+        _red "Incus initialization failed; cannot create the custom storage pool"
+        return 1
+    fi
+    if storage_pool_exists "$MANAGED_STORAGE_POOL"; then
+        _yellow "检测到已有 $MANAGED_STORAGE_POOL 存储池，将保留并复用它"
+        _yellow "An existing $MANAGED_STORAGE_POOL storage pool was found; preserving and reusing it"
+        record_storage_pool "$MANAGED_STORAGE_POOL"
+        return 0
+    fi
+    if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums" "$MANAGED_STORAGE_POOL"; then
+        record_storage_pool "$MANAGED_STORAGE_POOL"
+        return 0
+    fi
+    return 1
+}
 
 # 检测 sed 是否支持 -E 选项
 check_sed_extended_regex() {
@@ -880,19 +938,26 @@ create_storage_pool_with_custom_path() {
     local backend="$1"
     local storage_path="$2"
     local disk_nums="$3"
+    local pool_name="${4:-$MANAGED_STORAGE_POOL}"
     local loop_file mount_point temp status
+    if ! valid_storage_pool_name "$pool_name"; then
+        _red "Invalid managed storage pool name: $pool_name"
+        return 1
+    fi
+    if storage_pool_exists "$pool_name"; then
+        _yellow "检测到已有 $pool_name 存储池，将保留并复用它"
+        _yellow "An existing $pool_name storage pool was found; preserving and reusing it"
+        return 0
+    fi
     mkdir -p "$storage_path"
     if [ "$backend" = "lvm" ]; then
         loop_file="$storage_path/lvm_pool.img"
         _green "创建 LVM 存储池..."
         _green "Creating LVM storage pool..."
         if [ -f "$loop_file" ]; then
-            _yellow "检测到旧的循环文件，正在清理..."
-            _yellow "Detected old loop file, cleaning up..."
-            vgremove -f incus_vg 2>/dev/null || true
-            old_loop_dev="$(losetup -j "$loop_file" | cut -d: -f1)"
-            [ -n "$old_loop_dev" ] && losetup -d "$old_loop_dev" 2>/dev/null || true
-            rm -f "$loop_file"
+            _red "检测到已有 LVM 循环文件，拒绝覆盖：$loop_file"
+            _red "Existing LVM loop file found; refusing to overwrite: $loop_file"
+            return 1
         fi
         _green "创建稀疏文件：$loop_file (${disk_nums}GB)..."
         if ! create_sparse_file "$loop_file" "$disk_nums"; then
@@ -906,7 +971,7 @@ create_storage_pool_with_custom_path() {
         vgcreate incus_vg "$loop_dev" >/dev/null 2>&1
         echo "$loop_file" > "$storage_path/lvm_loop_file.txt"
         create_lvm_restore_service "$loop_file"
-        temp=$(incus storage create default lvm source=incus_vg 2>&1)
+        temp=$(incus storage create "$pool_name" lvm source=incus_vg 2>&1)
         status=$?
     elif [ "$backend" = "btrfs" ]; then
         loop_file="$storage_path/btrfs_pool.img"
@@ -914,14 +979,14 @@ create_storage_pool_with_custom_path() {
         _green "创建 btrfs 存储池..."
         _green "Creating btrfs storage pool..."
         if mountpoint -q "$mount_point" 2>/dev/null; then
-            _yellow "检测到旧的挂载点，正在卸载..."
-            _yellow "Detected old mount point, unmounting..."
-            umount "$mount_point" 2>/dev/null || true
+            _red "检测到已挂载的 btrfs 路径，拒绝卸载：$mount_point"
+            _red "Existing btrfs mount found; refusing to unmount: $mount_point"
+            return 1
         fi
         if [ -f "$loop_file" ]; then
-            _yellow "检测到旧的循环文件，正在删除..."
-            _yellow "Detected old loop file, removing..."
-            rm -f "$loop_file"
+            _red "检测到已有 btrfs 循环文件，拒绝覆盖：$loop_file"
+            _red "Existing btrfs loop file found; refusing to overwrite: $loop_file"
+            return 1
         fi
         _green "创建稀疏文件：$loop_file (${disk_nums}GB)..."
         if ! create_sparse_file "$loop_file" "$disk_nums"; then
@@ -943,7 +1008,7 @@ create_storage_pool_with_custom_path() {
             _green "Added to /etc/fstab for automatic mounting on boot"
         fi
         chmod 711 "$mount_point"
-        temp=$(incus storage create default btrfs source="$mount_point" 2>&1)
+        temp=$(incus storage create "$pool_name" btrfs source="$mount_point" 2>&1)
         status=$?
     elif [ "$backend" = "zfs" ]; then
         loop_file="$storage_path/zfs_pool.img"
@@ -951,14 +1016,14 @@ create_storage_pool_with_custom_path() {
         _green "创建 ZFS 存储池..."
         _green "Creating ZFS storage pool..."
         if zpool list "$zpool_name" >/dev/null 2>&1; then
-            _yellow "检测到旧的 ZFS pool，正在删除..."
-            _yellow "Detected old ZFS pool, removing..."
-            zpool destroy -f "$zpool_name" 2>/dev/null || true
+            _red "检测到已有 ZFS 存储池，拒绝销毁：$zpool_name"
+            _red "Existing ZFS pool found; refusing to destroy: $zpool_name"
+            return 1
         fi
         if [ -f "$loop_file" ]; then
-            _yellow "检测到旧的循环文件，正在删除..."
-            _yellow "Detected old loop file, removing..."
-            rm -f "$loop_file"
+            _red "检测到已有 ZFS 循环文件，拒绝覆盖：$loop_file"
+            _red "Existing ZFS loop file found; refusing to overwrite: $loop_file"
+            return 1
         fi
         _green "创建稀疏文件：$loop_file (${disk_nums}GB)..."
         if ! create_sparse_file "$loop_file" "$disk_nums"; then
@@ -974,7 +1039,10 @@ create_storage_pool_with_custom_path() {
         echo "$loop_file" > "$storage_path/zfs_loop_file.txt"
         echo "$zpool_name" > "$storage_path/zfs_pool_name.txt"
         create_zfs_restore_service "$loop_file" "$zpool_name"
-        temp=$(incus storage create default zfs source="$zpool_name" 2>&1)
+        temp=$(incus storage create "$pool_name" zfs source="$zpool_name" 2>&1)
+        status=$?
+    elif [ "$backend" = "dir" ]; then
+        temp=$(incus storage create "$pool_name" dir source="$storage_path" 2>&1)
         status=$?
     else
         _red "不支持的存储后端：$backend"
@@ -987,8 +1055,15 @@ create_storage_pool_with_custom_path() {
 
 init_storage_backend() {
     local backend="$1"
+    local existing_pool
+    if existing_pool=$(active_storage_pool); then
+        _yellow "检测到现有 $existing_pool 存储池，将保留并复用它"
+        _yellow "An existing $existing_pool storage pool was found; preserving and reusing it"
+        record_storage_pool "$existing_pool"
+        return 0
+    fi
     if is_storage_tried "$backend"; then
-        _yellow "已经尝试过 $backend，跳过"
+        _yellow "已经尝试过 ${backend}，跳过"
         _yellow "Already tried $backend, skipping"
         return 1
     fi
@@ -998,15 +1073,22 @@ init_storage_backend() {
         echo "dir" >/usr/local/bin/incus_storage_type
         if [ -n "$storage_path" ]; then
             mkdir -p "$storage_path"
-            incus admin init --auto
-            incus storage delete default 2>/dev/null || true
-            incus storage create default dir source="$storage_path"
+            if initialize_custom_storage_pool "$backend"; then
+                record_tried_storage "$backend"
+                return 0
+            fi
+            record_tried_storage "$backend"
+            return 1
         else
             # 默认挂载到 /var/lib/incus/storage-pools/default
-            incus admin init --storage-backend "$backend" --auto 
+            if incus admin init --storage-backend "$backend" --auto && storage_pool_exists default; then
+                record_storage_pool default
+                record_tried_storage "$backend"
+                return 0
+            fi
+            record_tried_storage "$backend"
+            return 1
         fi
-        record_tried_storage "$backend"
-        return $?
     fi
     _green "尝试使用 $backend 类型，存储池大小为 $disk_nums"
     _green "Trying to use $backend type with storage pool size $disk_nums"
@@ -1058,43 +1140,21 @@ init_storage_backend() {
         exit 1
     fi
     local temp
-    local incus_initialized=false
-    if incus network list >/dev/null 2>&1; then
-        incus_initialized=true
+    if existing_pool=$(active_storage_pool); then
+        _yellow "检测到现有 $existing_pool 存储池，将保留并复用它"
+        _yellow "An existing $existing_pool storage pool was found; preserving and reusing it"
+        record_storage_pool "$existing_pool"
+        echo "Existing $existing_pool storage pool preserved"
+        return 0
     fi
-    # 使用自定义存储路径时，不要先初始化，而是直接创建存储池后再初始化网络
-    if [ "$incus_initialized" = false ] && [ -z "$storage_path" ]; then
-        _green "首次初始化 Incus..."
-        _green "Initializing Incus for the first time..."
-        temp=$(incus admin init --auto 2>&1)
-    fi
+
     if [ -n "$storage_path" ]; then
         _yellow "当前存储池列表："
         _yellow "Current storage pools:"
         incus storage list 2>/dev/null || true
-        if incus storage list 2>/dev/null | grep -q "^| default"; then
-            _yellow "检测到 default 存储池存在，尝试删除..."
-            _yellow "Default storage pool exists, trying to delete..."
-            incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
-                [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
-            done
-            if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
-                _green "成功删除 default 存储池"
-                _green "Successfully deleted default storage pool"
-            else
-                _red "删除 default 存储池失败："
-                _red "Failed to delete default storage pool:"
-                cat /tmp/incus_delete.log
-            fi
-        fi
-        if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums"; then
+        if initialize_custom_storage_pool "$backend"; then
             temp="Storage pool created successfully"
             status=0
-            if ! incus network list 2>/dev/null | grep -q incusbr0; then
-                _yellow "网络未初始化，正在初始化网络配置..."
-                _yellow "Network not initialized, initializing network configuration..."
-                incus admin init --auto >/dev/null 2>&1 || true
-            fi
         else
             temp="Failed to create storage pool with custom path"
             status=1
@@ -1102,6 +1162,9 @@ init_storage_backend() {
     else
         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         status=$?
+        if [ "$status" -eq 0 ] && storage_pool_exists default; then
+            record_storage_pool default
+        fi
     fi
     _green "Init storage:"
     echo "$temp"
@@ -1112,22 +1175,7 @@ init_storage_backend() {
             _yellow "当前存储池列表："
             _yellow "Current storage pools:"
             incus storage list 2>/dev/null || true
-            if incus storage list 2>/dev/null | grep -q "^| default"; then
-                _yellow "检测到 default 存储池存在，尝试删除..."
-                _yellow "Default storage pool exists, trying to delete..."
-                incus storage volume list default 2>/dev/null | awk 'NR>3 {print $2}' | while read vol; do
-                    [ -n "$vol" ] && incus storage volume delete default "$vol" 2>/dev/null || true
-                done
-                if incus storage delete default 2>&1 | tee /tmp/incus_delete.log; then
-                    _green "成功删除 default 存储池"
-                    _green "Successfully deleted default storage pool"
-                else
-                    _red "删除 default 存储池失败："
-                    _red "Failed to delete default storage pool:"
-                    cat /tmp/incus_delete.log
-                fi
-            fi
-            if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums"; then
+            if initialize_custom_storage_pool "$backend"; then
                 temp="Storage pool created successfully after migration"
                 status=0
             else
@@ -1137,6 +1185,9 @@ init_storage_backend() {
         else
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             status=$?
+            if [ "$status" -eq 0 ] && storage_pool_exists default; then
+                record_storage_pool default
+            fi
         fi
         echo "$temp"
     fi
@@ -1154,6 +1205,13 @@ init_storage_backend() {
 }
 
 setup_storage() {
+    local existing_pool
+    if existing_pool=$(active_storage_pool); then
+        _green "检测到现有 $existing_pool 存储池，跳过后端重新初始化"
+        _green "An existing $existing_pool storage pool was found; skipping backend reinitialization"
+        record_storage_pool "$existing_pool"
+        return 0
+    fi
     if [ -f "/usr/local/bin/incus_storage_type" ]; then
         current_backend=$(cat /usr/local/bin/incus_storage_type)
         if [ "$current_backend" = "btrfs" ] && [ -f "/etc/fstab" ]; then
@@ -1249,11 +1307,13 @@ setup_storage() {
     echo "dir" >/usr/local/bin/incus_storage_type
     if [ -n "$storage_path" ]; then
         mkdir -p "$storage_path"
-        incus admin init --auto
-        incus storage delete default 2>/dev/null || true
-        incus storage create default dir source="$storage_path"
+        initialize_custom_storage_pool dir
     else
-        incus admin init --storage-backend dir --auto
+        if incus admin init --storage-backend dir --auto && storage_pool_exists default; then
+            record_storage_pool default
+            return 0
+        fi
+        return 1
     fi
 }
 
@@ -1622,4 +1682,6 @@ main() {
     fi
 }
 
-main
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    main
+fi

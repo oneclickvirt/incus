@@ -39,6 +39,9 @@ jobs:
           set -euo pipefail
           bash tests/image_lookup_test.sh
           bash tests/build_ipv6_network_test.sh
+          bash tests/build_failure_control_flow_test.sh
+          bash tests/storage_pool_preservation_test.sh
+          bash tests/batch_transaction_test.sh
 
       - name: Check shell lint errors
         shell: bash

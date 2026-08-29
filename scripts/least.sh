@@ -3,12 +3,76 @@
 # https://github.com/oneclickvirt/incus
 # cd /root
 # ./least.sh NAT服务器前缀 数量
-# 2025.08.03
+# 2026.08.30
 
-cd /root >/dev/null 2>&1 || exit 1
-if [ ! -d "/usr/local/bin" ]; then
-    mkdir -p "/usr/local/bin"
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    cd /root >/dev/null 2>&1 || exit 1
+    if [ ! -d "/usr/local/bin" ]; then
+        mkdir -p "/usr/local/bin"
+    fi
 fi
+
+incus_storage_pool() {
+    local pool_name="${INCUS_STORAGE_POOL:-}"
+    if [ -z "$pool_name" ] && [ -r /usr/local/bin/incus_storage_pool ]; then
+        IFS= read -r pool_name </usr/local/bin/incus_storage_pool || true
+    fi
+    [[ "$pool_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || pool_name="default"
+    printf '%s\n' "$pool_name"
+}
+
+batch_active=false
+batch_pending_log=""
+batch_created=()
+
+incus_instance_exists() {
+    incus info "$1" >/dev/null 2>&1
+}
+
+track_batch_instance() {
+    local candidate="$1"
+    local tracked
+    for tracked in "${batch_created[@]}"; do
+        [ "$tracked" = "$candidate" ] && return 0
+    done
+    batch_created+=("$candidate")
+}
+
+rollback_batch() {
+    local index instance_name
+    for ((index = ${#batch_created[@]} - 1; index >= 0; index--)); do
+        instance_name="${batch_created[index]}"
+        incus delete --force "$instance_name" >/dev/null 2>&1 || true
+    done
+    [ -z "$batch_pending_log" ] || rm -f -- "$batch_pending_log"
+    batch_created=()
+    batch_pending_log=""
+    batch_active=false
+}
+
+cleanup_failed_batch() {
+    local status=$?
+    if [ "$batch_active" = true ]; then
+        rollback_batch
+    fi
+    return "$status"
+}
+
+begin_batch() {
+    batch_pending_log=$(mktemp .log.pending.XXXXXX) || return 1
+    batch_active=true
+    trap cleanup_failed_batch EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+commit_batch_log() {
+    [ -s "$batch_pending_log" ] || return 1
+    mv -f -- "$batch_pending_log" log || return 1
+    batch_pending_log=""
+    batch_created=()
+    batch_active=false
+}
 
 check_china() {
     echo "IP area being detected ......"
@@ -166,10 +230,12 @@ create_base_container() {
                 incus image import incus.tar.xz rootfs.squashfs --alias "debian11-${sys_bit}"
                 rm -rf incus.tar.xz rootfs.squashfs "$image_file"
                 echo "自定义镜像导入成功，创建容器..."
-                incus init "debian11-${sys_bit}" "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -s default
-                if [ $? -eq 0 ]; then
+                if incus init "debian11-${sys_bit}" "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -s "$storage_pool"; then
                     echo "使用自定义镜像创建容器成功"
                     return 0
+                else
+                    local init_status=$?
+                    incus_instance_exists "$container_name" && return "$init_status"
                 fi
             else
                 echo "镜像文件解压失败，使用备用方法"
@@ -182,10 +248,17 @@ create_base_container() {
     # 备用方法：使用原有的镜像源
     echo "使用原有方法创建容器..."
     # 在创建时直接设置磁盘大小限制
-    incus init images:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -d root,size=1GiB -s default
-    if [ $? -ne 0 ]; then
-        incus init opsmaru:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -d root,size=1GiB -s default
+    if incus init images:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -d root,size=1GiB -s "$storage_pool"; then
+        return 0
+    else
+        local init_status=$?
+        incus_instance_exists "$container_name" && return "$init_status"
     fi
+    if incus init opsmaru:debian/11 "$container_name" -c limits.cpu=1 -c limits.memory=128MiB -d root,size=1GiB -s "$storage_pool"; then
+        return 0
+    fi
+    echo "容器创建失败：所有镜像源均不可用，已停止后续配置" >&2
+    return 1
 }
 
 setup_storage() {
@@ -208,11 +281,11 @@ configure_resources() {
                                 limits.ingress=300Mbit \
                                 limits.max=300Mbit 2>/dev/null || true
     # 设置 CPU 和内存限制
-    incus config set "$container_name" limits.cpu.priority 0
-    incus config set "$container_name" limits.cpu.allowance 50%
-    incus config set "$container_name" limits.cpu.allowance 25ms/100ms
-    incus config set "$container_name" limits.memory.swap true
-    incus config set "$container_name" limits.memory.swap.priority 1
+    incus config set "$container_name" limits.cpu.priority 0 || return 1
+    incus config set "$container_name" limits.cpu.allowance 50% || return 1
+    incus config set "$container_name" limits.cpu.allowance 25ms/100ms || return 1
+    incus config set "$container_name" limits.memory.swap true || return 1
+    incus config set "$container_name" limits.memory.swap.priority 1 || return 1
     incus config set "$container_name" security.nesting true
 }
 
@@ -277,15 +350,15 @@ block_ports() {
 
 download_scripts() {
     if [ ! -f /usr/local/bin/ssh_bash.sh ]; then
-        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh || exit 1
-        chmod 755 /usr/local/bin/ssh_bash.sh
-        dos2unix /usr/local/bin/ssh_bash.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh -o /usr/local/bin/ssh_bash.sh || return 1
+        chmod 755 /usr/local/bin/ssh_bash.sh || return 1
+        dos2unix /usr/local/bin/ssh_bash.sh || return 1
     fi
-    cp /usr/local/bin/ssh_bash.sh /root
+    cp /usr/local/bin/ssh_bash.sh /root || return 1
     if [ ! -f /usr/local/bin/config.sh ]; then
-        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh || exit 1
-        chmod 755 /usr/local/bin/config.sh
-        dos2unix /usr/local/bin/config.sh
+        curl -fsSLk https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh -o /usr/local/bin/config.sh || return 1
+        chmod 755 /usr/local/bin/config.sh || return 1
+        dos2unix /usr/local/bin/config.sh || return 1
     fi
     cp /usr/local/bin/config.sh /root
 }
@@ -294,28 +367,31 @@ setup_container() {
     local name="$1"
     local passwd="$2"
     local sshn="$3"
-    incus start "$name"
+    local container_ip=""
+    if ! incus start "$name"; then
+        echo "容器启动失败：$name" >&2
+        return 1
+    fi
     sleep 1
     if [[ "${CN}" == true ]]; then
-        incus exec "$name" -- yum install -y curl
-        incus exec "$name" -- apt-get install curl -y --fix-missing
-        incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh
-        incus exec "$name" -- chmod 755 ChangeMirrors.sh
-        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null
-        incus exec "$name" -- rm -rf ChangeMirrors.sh
+        incus exec "$name" -- sh -c 'if command -v yum >/dev/null 2>&1; then yum install -y curl; elif command -v apt-get >/dev/null 2>&1; then apt-get install curl -y --fix-missing; fi' || return 1
+        incus exec "$name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh || return 1
+        incus exec "$name" -- chmod 755 ChangeMirrors.sh || return 1
+        incus exec "$name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null || return 1
+        incus exec "$name" -- rm -rf ChangeMirrors.sh || return 1
     fi
-    incus exec "$name" -- sudo apt-get update -y
-    incus exec "$name" -- sudo apt-get install curl -y --fix-missing
-    incus exec "$name" -- sudo apt-get install -y --fix-missing dos2unix
-    incus file push /root/ssh_bash.sh "$name/root/"
-    incus exec "$name" -- chmod 755 ssh_bash.sh
-    incus exec "$name" -- dos2unix ssh_bash.sh
-    incus exec "$name" -- ./ssh_bash.sh "$passwd"
-    incus file push /root/config.sh "$name/root/"
-    incus exec "$name" -- chmod +x config.sh
-    incus exec "$name" -- dos2unix config.sh
-    incus exec "$name" -- bash config.sh
-    incus restart "$name"
+    incus exec "$name" -- sudo apt-get update -y || return 1
+    incus exec "$name" -- sudo apt-get install curl -y --fix-missing || return 1
+    incus exec "$name" -- sudo apt-get install -y --fix-missing dos2unix || return 1
+    incus file push /root/ssh_bash.sh "$name/root/" || return 1
+    incus exec "$name" -- chmod 755 ssh_bash.sh || return 1
+    incus exec "$name" -- dos2unix ssh_bash.sh || return 1
+    incus exec "$name" -- ./ssh_bash.sh "$passwd" || return 1
+    incus file push /root/config.sh "$name/root/" || return 1
+    incus exec "$name" -- chmod +x config.sh || return 1
+    incus exec "$name" -- dos2unix config.sh || return 1
+    incus exec "$name" -- bash config.sh || return 1
+    incus restart "$name" || return 1
     echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
     max_retries=3
     delay=5
@@ -331,20 +407,26 @@ setup_container() {
     done
     if [[ -z "$container_ip" ]]; then
         echo "Error: Container failed to start or no IP address was assigned."
-        exit 1
+        return 1
     fi
     ipv4_address=$(ip addr show | awk '/inet .*global/ && !/inet6/ {print $2}' | sed -n '1p' | cut -d/ -f1)
     echo "Host IPv4 address: $ipv4_address"
-    incus stop "$name"
+    incus stop "$name" || return 1
     sleep 0.5
     if ! incus config device set "$name" eth0 ipv4.address "$container_ip" 2>/dev/null; then
         if ! incus config device override "$name" eth0 ipv4.address="$container_ip" 2>/dev/null; then
             echo "Error: Failed to apply ipv4.address to device 'eth0' in container '$name'." >&2
-            exit 1
+            return 1
         fi
     fi
-    incus config device add "$name" ssh-port proxy listen=tcp:$ipv4_address:$sshn connect=tcp:0.0.0.0:22 nat=true
-    incus start "$name"
+    if ! incus config device add "$name" ssh-port proxy "listen=tcp:${ipv4_address}:${sshn}" connect=tcp:0.0.0.0:22 nat=true; then
+        echo "端口映射配置失败：$name" >&2
+        return 1
+    fi
+    if ! incus start "$name"; then
+        echo "容器最终启动失败：$name" >&2
+        return 1
+    fi
     if command -v firewall-cmd >/dev/null 2>&1; then
         firewall-cmd --permanent --add-port=$sshn/tcp
         firewall-cmd --reload
@@ -352,7 +434,7 @@ setup_container() {
         ufw allow ${sshn}/tcp
         ufw reload
     fi
-    echo "$name $sshn $passwd" >>log
+    printf '%s\n' "$name $sshn $passwd" >>"$batch_pending_log" || return 1
 }
 
 create_containers() {
@@ -363,25 +445,73 @@ create_containers() {
         local ssh_port=$((20000 + a))
         local password
         password="$(generate_password)"
-        incus copy "$base_name" "$container_name"
-        setup_container "$container_name" "$password" "$ssh_port"
+        if incus_instance_exists "$container_name"; then
+            echo "容器已存在，未修改既有实例：$container_name" >&2
+            return 1
+        fi
+        if incus copy "$base_name" "$container_name"; then
+            track_batch_instance "$container_name"
+        else
+            local copy_status=$?
+            incus_instance_exists "$container_name" && track_batch_instance "$container_name"
+            echo "容器复制失败：${container_name}，已停止后续创建" >&2
+            return "$copy_status"
+        fi
+        if ! setup_container "$container_name" "$password" "$ssh_port"; then
+            echo "容器配置失败：${container_name}，正在清理本次创建的容器" >&2
+            return 1
+        fi
     done
 }
 
 main() {
     local base_name="$1"
     local count="$2"
-    rm -rf log
+    if [ -z "$base_name" ] || ! [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Usage: $0 <container_prefix> <container_count>" >&2
+        return 1
+    fi
+    storage_pool="$(incus_storage_pool)"
+    if ! incus storage show "$storage_pool" >/dev/null 2>&1; then
+        echo "存储池不可用：$storage_pool" >&2
+        return 1
+    fi
     check_china
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
     check_cdn_file
     detect_arch
-    create_base_container "$base_name"
-    setup_storage "$base_name"
-    configure_resources "$base_name"
-    block_ports
-    download_scripts
-    create_containers "$base_name" "$count"
+    if incus_instance_exists "$base_name"; then
+        echo "基础容器已存在，未修改既有实例：$base_name" >&2
+        return 1
+    fi
+    if ! begin_batch; then
+        echo "无法创建批量日志暂存文件" >&2
+        return 1
+    fi
+    if create_base_container "$base_name"; then
+        track_batch_instance "$base_name"
+    else
+        local create_status=$?
+        incus_instance_exists "$base_name" && track_batch_instance "$base_name"
+        echo "基础容器创建失败，已停止后续配置" >&2
+        return "$create_status"
+    fi
+    setup_storage "$base_name" || return 1
+    configure_resources "$base_name" || return 1
+    block_ports || return 1
+    download_scripts || return 1
+    if ! create_containers "$base_name" "$count"; then
+        echo "批量容器创建失败，未写入成功日志" >&2
+        rm -f -- ssh_bash.sh config.sh ssh_sh.sh
+        return 1
+    fi
+    if ! commit_batch_log; then
+        echo "成功日志提交失败，正在回滚本批次容器" >&2
+        rm -f -- ssh_bash.sh config.sh ssh_sh.sh
+        return 1
+    fi
     rm -rf ssh_bash.sh config.sh ssh_sh.sh
 }
-main "$1" "$2"
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    main "${1:-}" "${2:-}"
+fi

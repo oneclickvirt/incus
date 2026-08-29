@@ -1,6 +1,6 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
-# 2026.08.26
+# 2026.08.30
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -694,16 +694,16 @@ install_package() {
             _red "启用 CRB（dnf）失败"
         }
     fi
-    _yellow "Re-trying installation of $pkg…"
-    _yellow "正在重试安装 $pkg…"
+    _yellow "Re-trying installation of ${pkg}…"
+    _yellow "正在重试安装 ${pkg}…"
     if $PACKAGETYPE_INSTALL "$pkg"; then
         _green "$pkg has been installed (with EPEL/CRB)"
         _green "$pkg 安装成功（利用 EPEL/CRB）"
         return 0
     fi
     if command -v pip3 &>/dev/null; then
-        _yellow "Attempting pip3 install for $pkg…"
-        _yellow "尝试通过 pip3 安装 $pkg…"
+        _yellow "Attempting pip3 install for ${pkg}…"
+        _yellow "尝试通过 pip3 安装 ${pkg}…"
         if pip3 install --user "$pkg"; then
             _green "$pkg installed via pip3 (in ~/.local/bin)"
             _green "$pkg 已通过 pip3 安装（位于 ~/.local/bin）"
@@ -711,7 +711,7 @@ install_package() {
         fi
     fi
     _red "ERROR: Unable to install $pkg – please check repos or install manually"
-    _red "错误：无法安装 $pkg，请检查仓库或手动安装"
+    _red "错误：无法安装 ${pkg}，请检查仓库或手动安装"
     return 1
 }
 

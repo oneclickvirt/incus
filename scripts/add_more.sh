@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/incus
-# 2026.02.28
+# 2026.08.30
 
 # cd /root
 red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -36,7 +36,9 @@ load_image_lookup() {
     exit 1
 }
 
-load_image_lookup
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    load_image_lookup
+fi
 
 is_noninteractive() {
     case "${noninteractive:-}" in
@@ -55,18 +57,20 @@ is_positive_int() {
 is_positive_number() {
     [[ "$1" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]]
 }
-utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
-if [[ -z "$utf8_locale" ]]; then
-    yellow "No UTF-8 locale found"
-else
-    export LC_ALL="$utf8_locale"
-    export LANG="$utf8_locale"
-    export LANGUAGE="$utf8_locale"
-    green "Locale set to $utf8_locale"
-fi
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
+    if [[ -z "$utf8_locale" ]]; then
+        yellow "No UTF-8 locale found"
+    else
+        export LC_ALL="$utf8_locale"
+        export LANG="$utf8_locale"
+        export LANGUAGE="$utf8_locale"
+        green "Locale set to $utf8_locale"
+    fi
 
-if ! command -v jq; then
-    apt-get install jq -y
+    if ! command -v jq >/dev/null 2>&1; then
+        apt-get install jq -y
+    fi
 fi
 
 check_cdn() {
@@ -98,7 +102,9 @@ check_cdn_file() {
 }
 
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
-check_cdn_file
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    check_cdn_file
+fi
 
 pre_check() {
     home_dir=$(eval echo "~$(whoami)")
@@ -181,6 +187,67 @@ check_log() {
         public_port_end=30000
     fi
 
+}
+
+add_batch_active=false
+add_batch_pending_log=""
+add_batch_commit_log=""
+add_batch_created=()
+
+incus_instance_exists() {
+    incus info "$1" >/dev/null 2>&1
+}
+
+track_add_batch_instance() {
+    local candidate="$1"
+    local tracked
+    for tracked in "${add_batch_created[@]}"; do
+        [ "$tracked" = "$candidate" ] && return 0
+    done
+    add_batch_created+=("$candidate")
+}
+
+rollback_add_batch() {
+    local index container_name
+    for ((index = ${#add_batch_created[@]} - 1; index >= 0; index--)); do
+        container_name="${add_batch_created[index]}"
+        incus delete --force "$container_name" >/dev/null 2>&1 || true
+        rm -f -- "$container_name"
+    done
+    [ -z "$add_batch_pending_log" ] || rm -f -- "$add_batch_pending_log"
+    [ -z "$add_batch_commit_log" ] || rm -f -- "$add_batch_commit_log"
+    add_batch_created=()
+    add_batch_pending_log=""
+    add_batch_commit_log=""
+    add_batch_active=false
+}
+
+cleanup_add_batch() {
+    local status=$?
+    if [ "$add_batch_active" = true ]; then
+        rollback_add_batch
+    fi
+    return "$status"
+}
+
+begin_add_batch() {
+    add_batch_pending_log=$(mktemp .log.pending.XXXXXX) || return 1
+    add_batch_active=true
+    trap cleanup_add_batch EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+commit_add_batch_log() {
+    add_batch_commit_log=$(mktemp .log.commit.XXXXXX) || return 1
+    if [ -f log ] && ! cat log >"$add_batch_commit_log"; then
+        return 1
+    fi
+    if ! cat "$add_batch_pending_log" >>"$add_batch_commit_log"; then
+        return 1
+    fi
+    mv -f -- "$add_batch_commit_log" log || return 1
+    add_batch_commit_log=""
 }
 
 build_new_containers() {
@@ -329,21 +396,65 @@ build_new_containers() {
     else
         status_ipv6="N"
     fi
-    for ((i = 1; i <= $new_nums; i++)); do
+    if ! begin_add_batch; then
+        red "无法创建批量日志暂存文件"
+        red "Unable to create the batch log staging file"
+        return 1
+    fi
+
+    for ((i = 1; i <= new_nums; i++)); do
         container_num=$(($container_num + 1))
         container_name="${container_prefix}${container_num}"
         ssh_port=$(($ssh_port + 1))
         public_port_start=$(($public_port_end + 1))
         public_port_end=$(($public_port_start + 24))
-        ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system" "$template"
-        cat "$container_name" >>log
-        rm -rf "$container_name"
+        if incus_instance_exists "$container_name"; then
+            red "容器 ${container_name} 已存在，未修改既有实例"
+            red "Container ${container_name} already exists; the existing instance was not changed"
+            return 1
+        fi
+        if ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system" "$template"; then
+            track_add_batch_instance "$container_name"
+        else
+            build_status=$?
+            if incus_instance_exists "$container_name"; then
+                track_add_batch_instance "$container_name"
+            fi
+            red "容器 ${container_name} 创建失败，已停止后续批量创建"
+            red "Container ${container_name} creation failed; remaining batch items were not started"
+            rm -f -- "$container_name"
+            return "$build_status"
+        fi
+        if [ ! -s "$container_name" ]; then
+            red "容器 ${container_name} 未生成成功记录，已停止后续批量创建"
+            rm -f -- "$container_name"
+            return 1
+        fi
+        if ! cat "$container_name" >>"$add_batch_pending_log"; then
+            red "容器 ${container_name} 成功记录暂存失败"
+            rm -f -- "$container_name"
+            return 1
+        fi
+        rm -f -- "$container_name"
     done
+    if ! commit_add_batch_log; then
+        red "批量日志提交失败，正在回滚本批次容器"
+        red "Batch log commit failed; rolling back this batch"
+        return 1
+    fi
+    rm -f -- "$add_batch_pending_log"
+    add_batch_pending_log=""
+    add_batch_created=()
+    add_batch_active=false
 }
 
-pre_check
-check_log
-build_new_containers
-green "Generating new chicks is complete"
-green "生成新的容器完毕"
-check_log
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    pre_check
+    check_log
+    if ! build_new_containers; then
+        exit 1
+    fi
+    green "Generating new chicks is complete"
+    green "生成新的容器完毕"
+    check_log
+fi
