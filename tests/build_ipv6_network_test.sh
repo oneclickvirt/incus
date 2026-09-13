@@ -208,6 +208,90 @@ if grep -Eq 'ip[[:space:]]+addr[[:space:]]+del[[:space:]]+fe80:' "$ROOT_DIR/scri
     fail "build script still deletes link-local IPv6 addresses"
 fi
 
+# The routed device path must be additive and idempotent. An existing
+# bridged NIC (or non-NIC device) must never be removed just to make room for
+# eth1, while a valid routed NIC is updated in place.
+device_calls="$TMP_DIR/device-calls"
+INCUS_FAKE_DEVICE=missing
+incus() {
+    printf '%s\n' "$*" >>"$device_calls"
+    if [ "$1" = config ] && [ "$2" = device ] && [ "$3" = get ]; then
+        case "$6" in
+            type)
+                [ "$INCUS_FAKE_DEVICE" != missing ] || return 1
+                if [ "$INCUS_FAKE_DEVICE" = nonnic ]; then
+                    printf '%s\n' disk
+                else
+                    printf '%s\n' nic
+                fi
+                ;;
+            nictype)
+                if [ "$INCUS_FAKE_DEVICE" = routed ] || [ "$INCUS_FAKE_DEVICE" = set-fails ]; then
+                    printf '%s\n' routed
+                elif [ "$INCUS_FAKE_DEVICE" = bridged ]; then
+                    printf '%s\n' bridged
+                else
+                    return 1
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+        return 0
+    fi
+    if [ "$1" = config ] && [ "$2" = device ] && [ "$3" = set ]; then
+        [ "$INCUS_FAKE_DEVICE" != set-fails ] || return 1
+        return 0
+    fi
+    if [ "$1" = config ] && [ "$2" = device ] && [ "$3" = add ]; then
+        [ "$INCUS_FAKE_DEVICE" = missing ] || return 1
+        return 0
+    fi
+    if [ "$1" = config ] && [ "$2" = device ] && [ "$3" = override ]; then
+        [ "$INCUS_FAKE_DEVICE" = set-fails ] || return 1
+        return 0
+    fi
+    return 0
+}
+
+: >"$device_calls"
+configure_routed_ipv6_device testct eth0 2001:db8::10 || fail "new routed eth1 was not added"
+grep -Fq 'config device add testct eth1 nic nictype=routed parent=eth0 ipv6.address=2001:db8::10 ipv6.gateway=auto' "$device_calls" || fail "new routed eth1 did not set ipv6.gateway=auto"
+if grep -Fq 'config device remove' "$device_calls"; then
+    fail "new routed eth1 unexpectedly removed a device"
+fi
+
+: >"$device_calls"
+INCUS_FAKE_DEVICE=routed
+configure_routed_ipv6_device testct eth0 2001:db8::11 || fail "existing routed eth1 was not updated"
+grep -Fq 'config device set testct eth1 ipv6.gateway auto' "$device_calls" || fail "existing routed eth1 did not receive ipv6.gateway=auto"
+if grep -Fq 'config device remove' "$device_calls" || grep -Fq 'config device add' "$device_calls"; then
+    fail "existing routed eth1 was removed/replaced"
+fi
+
+: >"$device_calls"
+INCUS_FAKE_DEVICE=bridged
+if configure_routed_ipv6_device testct eth0 2001:db8::12; then
+    fail "bridged eth1 was silently overwritten"
+fi
+if grep -Fq 'config device remove' "$device_calls" || grep -Fq 'config device add' "$device_calls" || grep -Fq 'config device set' "$device_calls"; then
+    fail "bridged eth1 was modified after validation failure"
+fi
+
+: >"$device_calls"
+INCUS_FAKE_DEVICE=nonnic
+if configure_routed_ipv6_device testct eth0 2001:db8::13; then
+    fail "non-NIC eth1 was silently overwritten"
+fi
+
+: >"$device_calls"
+INCUS_FAKE_DEVICE=set-fails
+configure_routed_ipv6_device testct eth0 2001:db8::14 || fail "profile device override failed"
+grep -Fq 'config device override testct eth1 nictype=routed parent=eth0 ipv6.address=2001:db8::14 ipv6.gateway=auto' "$device_calls" || fail "profile device update did not use a safe override"
+if grep -Fq 'config device remove' "$device_calls"; then
+    fail "failed profile update removed eth1"
+fi
+unset -f incus
+
 # Reboot restoration consumes the exact prefix/interface metadata and must not
 # invent a /64 or bind ULA/documentation addresses as public mappings.
 # shellcheck disable=SC1091

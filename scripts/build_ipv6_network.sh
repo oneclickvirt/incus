@@ -428,7 +428,13 @@ disable_legacy_link_local_cleanup() {
 configure_ipv6_nat66_fallback() {
     local network="${INCUS_IPV6_NETWORK:-incusbr0}" parent current existing_mode
     if command -v incus >/dev/null 2>&1 && [ -n "${CONTAINER_NAME:-}" ]; then
+        # Containers normally use eth0 while VMs created by buildvm.sh use
+        # enp5s0.  Query both so a VM fallback does not accidentally enable
+        # NAT on an unrelated host bridge.
         parent=$(incus config device get "$CONTAINER_NAME" eth0 parent 2>/dev/null || true)
+        if [ -z "$parent" ]; then
+            parent=$(incus config device get "$CONTAINER_NAME" enp5s0 parent 2>/dev/null || true)
+        fi
         [[ "$parent" =~ ^[A-Za-z0-9_.:-]+$ ]] && network="$parent"
         current=$(incus network get "$network" ipv6.address 2>/dev/null || true)
         if [ -z "$current" ] || [ "$current" = "none" ]; then
@@ -898,7 +904,12 @@ wait_for_container_stopped() {
 get_container_ipv6() {
     local container_name=$1
     local ipv6
-    ipv6=$(incus list "$container_name" --format=json 2>/dev/null | jq -r '.[0].state.network.eth0.addresses[]? | select(.family=="inet6") | select(.scope=="global") | .address' 2>/dev/null | head -n 1)
+    # LXC commonly exposes eth0, while Incus VMs use enp5s0 (and custom
+    # profiles can use another name).  Search every reported interface and
+    # accept only one normalized global IPv6 address.
+    ipv6=$(incus list "$container_name" --format=json 2>/dev/null |
+        jq -r '.[0].state.network // {} | to_entries[] | .value.addresses[]? |
+            select(.family=="inet6" and .scope=="global") | .address' 2>/dev/null | head -n 1)
     if ! ipv6=$(normalize_ipv6_address "$ipv6" 2>/dev/null); then
         _red "Container has no single valid intranet IPv6 address, no auto-mapping" >&2
         _red "容器没有单一有效的内网 IPv6 地址，不进行自动映射" >&2
@@ -946,6 +957,53 @@ get_ipv6_gateway_info() {
         echo "Y"
     else
         echo "N"
+    fi
+}
+
+configure_routed_ipv6_device() {
+    local container_name="$1"
+    local ipv6_network_name="$2"
+    local incus_ipv6="$3"
+    local existing_type existing_nictype
+
+    # Never remove an existing eth1 blindly.  A profile may provide a
+    # bridged NIC or an administrator may have attached a disk/proxy under
+    # that name.  Only a pre-existing routed NIC is eligible for an in-place
+    # update; anything else is rejected so the caller can abort and clean up
+    # the instance it owns.
+    if existing_type=$(incus config device get "$container_name" eth1 type 2>/dev/null); then
+        existing_type=$(printf '%s' "$existing_type" | tr -d '[:space:]')
+        if [ "$existing_type" != "nic" ]; then
+            _red "Refusing to replace existing eth1 device of type '$existing_type'." >&2
+            _red "已有 eth1 不是网卡设备，拒绝覆盖。" >&2
+            return 1
+        fi
+        existing_nictype=$(incus config device get "$container_name" eth1 nictype 2>/dev/null || true)
+        existing_nictype=$(printf '%s' "$existing_nictype" | tr -d '[:space:]')
+        if [ "$existing_nictype" != "routed" ]; then
+            _red "Refusing to replace existing eth1 NIC with nictype '$existing_nictype'." >&2
+            _red "已有 eth1 不是 routed 网卡，拒绝覆盖。" >&2
+            return 1
+        fi
+        # `set` works for an instance-local device.  If eth1 is inherited
+        # from a profile, Incus requires an override; keep the same
+        # validation and never fall back to remove/add.
+        if ! incus config device set "$container_name" eth1 nictype routed 2>/dev/null ||
+            ! incus config device set "$container_name" eth1 parent "$ipv6_network_name" 2>/dev/null ||
+            ! incus config device set "$container_name" eth1 ipv6.address "$incus_ipv6" 2>/dev/null ||
+            ! incus config device set "$container_name" eth1 ipv6.gateway auto 2>/dev/null; then
+            if ! incus config device override "$container_name" eth1 \
+                nictype=routed parent="$ipv6_network_name" \
+                ipv6.address="$incus_ipv6" ipv6.gateway=auto 2>/dev/null; then
+                _red "Unable to update the existing routed eth1 device." >&2
+                _red "无法更新已有的 routed eth1 设备。" >&2
+                return 1
+            fi
+        fi
+    else
+        incus config device add "$container_name" eth1 nic \
+            nictype=routed parent="$ipv6_network_name" \
+            ipv6.address="$incus_ipv6" ipv6.gateway=auto || return 1
     fi
 }
 
@@ -1044,8 +1102,7 @@ setup_network_device_ipv6() {
         incus stop "$container_name"
         sleep 3
         wait_for_container_stopped "$container_name"
-        incus config device remove "$container_name" eth1 >/dev/null 2>&1 || true
-        incus config device add "$container_name" eth1 nic nictype=routed parent="$ipv6_network_name" ipv6.address="$incus_ipv6" || return 1
+        configure_routed_ipv6_device "$container_name" "$ipv6_network_name" "$incus_ipv6" || return 1
         sleep 3
         if command -v firewall-cmd >/dev/null 2>&1; then
             firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name"

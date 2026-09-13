@@ -38,7 +38,11 @@ build_succeeded=false
 cleanup_failed_instance() {
     local status=$?
     if [ "$created_instance" = true ] && [ "$build_succeeded" != true ] && [ -n "${name:-}" ] && command -v incus >/dev/null 2>&1; then
-        incus delete --force "$name" >/dev/null 2>&1 || true
+        local cleanup_output
+        if ! cleanup_output=$(incus delete --force "$name" 2>&1); then
+            echo "Warning: failed to roll back Incus instance '$name': $cleanup_output" >&2
+            echo "警告：回滚删除 Incus 实例 '$name' 失败：$cleanup_output" >&2
+        fi
     fi
     return "$status"
 }
