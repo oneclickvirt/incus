@@ -205,12 +205,10 @@ service_manager() {
             ;;
         daemon-reload)
             if command -v systemctl >/dev/null 2>&1; then
-                systemctl daemon-reload 2>/dev/null
-                executed=true
-                success=true
-            fi
-            if ! $executed; then
-                success=true
+                if systemctl daemon-reload 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
             fi
             ;;
     esac

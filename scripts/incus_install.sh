@@ -28,7 +28,7 @@
 #   INCUS_STORAGE_PATH=/data/incus-storage INCUS_DISK_SIZE=80 bash incus_install.sh
 
 cd /root >/dev/null 2>&1 || exit 1
-REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
+REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon[[:space:]]+linux" "fedora" "arch" "freebsd")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "FreeBSD")
 CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')" "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(uname -s)")
 SYS="${CMD[0]}"
@@ -48,6 +48,13 @@ storage_pool_exists() {
     incus storage show "$pool_name" >/dev/null 2>&1
 }
 
+# `incus query` returns an API envelope on real daemons while test doubles and
+# older wrappers may return the metadata object directly.  Normalize both
+# forms before inspecting profile/network fields.
+api_metadata() {
+    jq -c 'if type == "object" and ((.metadata? | type) == "object") then .metadata else . end'
+}
+
 valid_storage_pool_name() {
     [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
 }
@@ -61,9 +68,27 @@ active_storage_pool() {
             return 0
         fi
     fi
+    # Prefer the pool referenced by an existing default profile, including
+    # common names such as "local". Do not reinitialize a partially set up host.
+    pool_name=$(incus query /1.0/profiles/default 2>/dev/null | api_metadata |
+        jq -r '[.devices[]? | select(.type == "disk" and .path == "/") | .pool // empty] | if length == 1 then .[0] else empty end' 2>/dev/null)
+    if valid_storage_pool_name "$pool_name" && storage_pool_exists "$pool_name"; then
+        printf '%s\n' "$pool_name"
+        return 0
+    fi
     if storage_pool_exists default; then
         printf '%s\n' default
         return 0
+    fi
+    local pools
+    pools=$(incus storage list --format csv -c n) || return 2
+    if [ -n "$pools" ]; then
+        if [[ "$pools" != *$'\n'* ]] && valid_storage_pool_name "$pools" && storage_pool_exists "$pools"; then
+            printf '%s\n' "$pools"
+            return 0
+        fi
+        _red "Multiple storage pools exist; set STORAGE_POOL_FILE to the pool to reuse" >&2
+        return 2
     fi
     return 1
 }
@@ -78,8 +103,11 @@ record_storage_pool() {
 # created. The automatic initializer may create default; keep that pool and
 # use a separate recorded pool for this installer's custom storage path.
 initialize_custom_storage_pool() {
-    local backend="$1"
-    if ! incus admin init --auto; then
+    local backend="$1" init_output init_status
+    init_output=$(incus admin init --auto 2>&1)
+    init_status=$?
+    if [ "$init_status" -ne 0 ] && ! grep -Eiq 'already[[:space:]]+(been[[:space:]]+)?initialized|already[[:space:]]+exists|already[[:space:]]+configured' <<<"$init_output"; then
+        printf '%s\n' "$init_output" >&2
         _red "Incus 初始化失败，无法创建自定义存储池"
         _red "Incus initialization failed; cannot create the custom storage pool"
         return 1
@@ -87,11 +115,11 @@ initialize_custom_storage_pool() {
     if storage_pool_exists "$MANAGED_STORAGE_POOL"; then
         _yellow "检测到已有 $MANAGED_STORAGE_POOL 存储池，将保留并复用它"
         _yellow "An existing $MANAGED_STORAGE_POOL storage pool was found; preserving and reusing it"
-        record_storage_pool "$MANAGED_STORAGE_POOL"
+        record_storage_pool "$MANAGED_STORAGE_POOL" || return 1
         return 0
     fi
     if create_storage_pool_with_custom_path "$backend" "$storage_path" "$disk_nums" "$MANAGED_STORAGE_POOL"; then
-        record_storage_pool "$MANAGED_STORAGE_POOL"
+        record_storage_pool "$MANAGED_STORAGE_POOL" || return 1
         return 0
     fi
     return 1
@@ -151,7 +179,7 @@ init_env() {
     check_grep_extended_regex
     check_grep_perl_regex
     if [ ! -d "/usr/local/bin" ]; then
-        mkdir -p /usr/local/bin
+        mkdir -p /usr/local/bin || return 1
     fi
     utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "utf8|UTF-8")
     if [[ -z "$utf8_locale" ]]; then
@@ -302,12 +330,10 @@ service_manager() {
             ;;
         daemon-reload)
             if command -v systemctl >/dev/null 2>&1; then
-                systemctl daemon-reload 2>/dev/null
-                executed=true
-                success=true
-            fi
-            if ! $executed; then
-                success=true
+                if systemctl daemon-reload 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
             fi
             ;;
         is-active)
@@ -373,9 +399,13 @@ detect_os() {
             VERSION="$VERSION_ID"
             PACKAGETYPE="dnf"
             PACKAGETYPE_INSTALL="dnf install -y"
+            PACKAGETYPE_UPDATE="dnf -y makecache"
             PACKAGETYPE_REMOVE="dnf remove -y"
             if [[ "$VERSION" =~ ^7 ]]; then
                 PACKAGETYPE="yum"
+                PACKAGETYPE_INSTALL="yum install -y"
+                PACKAGETYPE_UPDATE="yum -y makecache"
+                PACKAGETYPE_REMOVE="yum remove -y"
             fi
             ;;
         arch | archarm | endeavouros | blendos | garuda)
@@ -415,12 +445,14 @@ detect_os() {
         elif command -v dnf >/dev/null 2>&1; then
             PACKAGETYPE="dnf"
             PACKAGETYPE_INSTALL="dnf install -y"
-            PACKAGETYPE_UPDATE="dnf check-update"
+            # `check-update` returns 100 when updates are available, which is
+            # a successful state for an installer but would abort this script.
+            PACKAGETYPE_UPDATE="dnf -y makecache"
             PACKAGETYPE_REMOVE="dnf remove -y"
         elif command -v yum >/dev/null 2>&1; then
             PACKAGETYPE="yum"
             PACKAGETYPE_INSTALL="yum install -y"
-            PACKAGETYPE_UPDATE="yum check-update"
+            PACKAGETYPE_UPDATE="yum -y makecache"
             PACKAGETYPE_REMOVE="yum remove -y"
         elif command -v pacman >/dev/null 2>&1; then
             PACKAGETYPE="pacman"
@@ -453,16 +485,103 @@ install_package() {
 }
 
 install_dependencies() {
-    $PACKAGETYPE_UPDATE
-    install_package wget
-    install_package curl
-    install_package sudo
-    install_package dos2unix
-    install_package jq
-    install_package ipcalc
-    install_package unzip
-    install_package gpg
-    install_package bc
+    $PACKAGETYPE_UPDATE || {
+        _red "Package index update failed; cannot install Incus prerequisites"
+        return 1
+    }
+    local package_name
+    for package_name in wget curl sudo dos2unix jq ipcalc unzip bc; do
+        install_package "$package_name" || {
+            _red "Required package installation failed: $package_name"
+            return 1
+        }
+    done
+    install_gpg || {
+        _red "Required package installation failed: gpg"
+        return 1
+    }
+}
+
+# Other vendor sysctl files can contain unsupported optional keys. Validate
+# the forwarding file we own and the effective value before declaring ready.
+apply_forwarding_config() {
+    local config_file="$1"
+    if sysctl --help 2>&1 | grep -q -- '--system'; then
+        if ! sysctl --system >/dev/null 2>&1; then
+            sysctl -p "$config_file" >/dev/null 2>&1 || return 1
+        fi
+    else
+        sysctl -p "$config_file" >/dev/null 2>&1 || return 1
+    fi
+    [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ] || {
+        _red "Required IPv4 forwarding is not enabled"
+        return 1
+    }
+}
+
+# uidmap is a Debian package name; other distributions use shadow packages.
+install_uidmap() {
+    if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        install_package uidmap || return 1
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        install_package shadow-utils || return 1
+    elif command -v apk >/dev/null 2>&1; then
+        install_package shadow-uidmap || install_package shadow || return 1
+    elif command -v pacman >/dev/null 2>&1; then
+        install_package shadow || return 1
+    else
+        _red "No supported package manager found for uidmap"
+        return 1
+    fi
+    if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
+        _red "newuidmap/newgidmap are still unavailable after package installation"
+        return 1
+    fi
+}
+
+install_gpg() {
+    command -v gpg >/dev/null 2>&1 && return 0
+    case "$PACKAGETYPE" in
+        apt) $PACKAGETYPE_INSTALL gpg || return 1 ;;
+        dnf|yum) $PACKAGETYPE_INSTALL gnupg2 || $PACKAGETYPE_INSTALL gnupg || return 1 ;;
+        pacman) $PACKAGETYPE_INSTALL gnupg || return 1 ;;
+        apk) $PACKAGETYPE_INSTALL gnupg || return 1 ;;
+        *) _red "Unable to install gpg for package manager $PACKAGETYPE"; return 1 ;;
+    esac
+    command -v gpg >/dev/null 2>&1 || {
+        _red "gpg is still unavailable after package installation"
+        return 1
+    }
+}
+
+# `lsb_release` is the executable name; package names differ by family.
+# Installing the executable name as a package makes Debian/Ubuntu hosts fail
+# after Incus itself has already been installed.
+install_lsb_release() {
+    command -v lsb_release >/dev/null 2>&1 && return 0
+    case "${PACKAGETYPE:-}" in
+        apt)
+            $PACKAGETYPE_INSTALL lsb-release || return 1
+            ;;
+        dnf|yum)
+            $PACKAGETYPE_INSTALL redhat-lsb-core ||
+                $PACKAGETYPE_INSTALL lsb-release || return 1
+            ;;
+        pacman|apk)
+            $PACKAGETYPE_INSTALL lsb-release || return 1
+            ;;
+        *)
+            _red "Unable to install lsb_release for package manager ${PACKAGETYPE:-unknown}"
+            return 1
+            ;;
+    esac
+    command -v lsb_release >/dev/null 2>&1 || {
+        _red "lsb_release is still unavailable after package installation"
+        return 1
+    }
 }
 
 check_cdn() {
@@ -540,9 +659,17 @@ rebuild_cloud_init() {
 
 install_via_zabbly() {
     echo "使用 Zabbly 仓库安装 incus | Installing incus using Zabbly repository"
-    mkdir -p /etc/apt/keyrings/
-    curl -fsSL https://pkgs.zabbly.com/key.asc | gpg --batch --yes --dearmor -o /etc/apt/keyrings/zabbly.gpg
-    cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources
+    mkdir -p /etc/apt/keyrings/ || return 1
+    local key_tmp
+    key_tmp=$(mktemp /tmp/zabbly-incus-key.XXXXXX) || return 1
+    if ! curl -fsSL https://pkgs.zabbly.com/key.asc -o "$key_tmp" ||
+       ! gpg --batch --yes --dearmor -o /etc/apt/keyrings/zabbly.gpg "$key_tmp"; then
+        rm -f -- "$key_tmp"
+        _red "无法下载或校验 Zabbly 仓库密钥"
+        return 1
+    fi
+    rm -f -- "$key_tmp"
+    cat <<EOF >/etc/apt/sources.list.d/zabbly-incus-stable.sources || return 1
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
@@ -551,8 +678,8 @@ Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.gpg
 EOF
-    apt update -y
-    apt install -y incus
+    apt update -y || return 1
+    apt install -y incus || return 1
 }
 
 ensure_debian_backports_repo() {
@@ -583,12 +710,12 @@ install_incus() {
             echo "取消注释 /etc/apk/repositories 中 edge main 与 edge community 仓库 | Uncommenting edge main and edge community repositories in /etc/apk/repositories"
             sed -i 's/^#\s*\(https:\/\/dl-cdn.alpinelinux.org\/alpine\/edge\/main\)/\1/' /etc/apk/repositories
             sed -i 's/^#\s*\(https:\/\/dl-cdn.alpinelinux.org\/alpine\/edge\/community\)/\1/' /etc/apk/repositories
-            apk update
+            apk update || return 1
             echo "安装 incus 和 incus-client | Installing incus and incus-client"
-            apk add incus incus-client
+            apk add incus incus-client || return 1
             echo "添加 incus 服务到系统启动，并启动服务 | Adding incus service to system startup and starting service"
-            rc-update add incusd
-            rc-service incusd start
+            rc-update add incusd || return 1
+            rc-service incusd start || return 1
         elif [ -f /etc/debian_version ]; then
             . /etc/os-release
             echo "检测到 $NAME $VERSION_ID | Detected $NAME $VERSION_ID"
@@ -612,83 +739,88 @@ install_incus() {
                     apt install -y incus || install_via_zabbly
                 fi
             fi
-            service_manager enable incus
-            service_manager start incus
+            service_manager enable incus || return 1
+            service_manager start incus || return 1
         elif [ -f /etc/arch-release ]; then
             echo "检测到 Arch Linux | Detected Arch Linux"
             echo "移除 iptables（如果存在）并安装 iptables-nft 与 incus | Removing iptables (if exists) and installing iptables-nft and incus"
-            pacman -R --noconfirm iptables
-            pacman -Syu --noconfirm iptables-nft incus
-            service_manager enable incus
-            service_manager start incus
+            pacman -R --noconfirm iptables >/dev/null 2>&1 || true
+            pacman -Syu --noconfirm iptables-nft incus || return 1
+            service_manager enable incus || return 1
+            service_manager start incus || return 1
         elif [ -f /etc/gentoo-release ]; then
             echo "检测到 Gentoo | Detected Gentoo"
             echo "使用 emerge 安装 incus | Installing incus using emerge"
-            emerge -v app-containers/incus
+            emerge -v app-containers/incus || return 1
         elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ] || [ -f /etc/almalinux-release ] || [ -f /etc/rockylinux-release ]; then
             echo "检测到 RPM 系统 | Detected RPM-based system"
             echo "安装 epel-release，并启用 COPR 仓库及 CodeReady Builder (CRB) | Installing epel-release, enabling COPR repository and CodeReady Builder (CRB)"
-            dnf -y install epel-release
-            dnf copr enable -y neil/incus
-            dnf config-manager --set-enabled crb
+            dnf -y install epel-release || return 1
+            dnf copr enable -y neil/incus || return 1
+            dnf config-manager --set-enabled crb || return 1
             echo "安装 incus 与 incus-tools | Installing incus and incus-tools"
-            dnf install -y incus incus-tools
-            service_manager enable incus
-            service_manager start incus
+            dnf install -y incus incus-tools || return 1
+            service_manager enable incus || return 1
+            service_manager start incus || return 1
         elif [ -f /etc/void-release ]; then
             echo "检测到 Void Linux | Detected Void Linux"
             echo "使用 xbps 安装 incus 与 incus-client | Installing incus and incus-client using xbps"
-            xbps-install -S incus incus-client
+            xbps-install -S incus incus-client || return 1
             echo "启用并启动 incus 服务 | Enabling and starting incus service"
-            ln -s /etc/sv/incus /var/service
-            ln -s /etc/sv/incus-user /var/service
-            sv up incus
-            sv up incus-user
+            [ -e /var/service/incus ] || ln -s /etc/sv/incus /var/service || return 1
+            [ -e /var/service/incus-user ] || ln -s /etc/sv/incus-user /var/service || return 1
+            sv up incus || return 1
+            sv up incus-user || return 1
         else
             echo "未识别的系统，尝试使用常见包管理器安装 incus | Unrecognized system, trying common package managers to install incus"
             if command -v apt >/dev/null 2>&1; then
-                apt update
-                apt install -y incus
-                service_manager enable incus
-            service_manager start incus
+                apt update || return 1
+                apt install -y incus || return 1
+                service_manager enable incus || return 1
+                service_manager start incus || return 1
             elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y incus
-                service_manager enable incus
-            service_manager start incus
+                dnf install -y incus || return 1
+                service_manager enable incus || return 1
+                service_manager start incus || return 1
             elif command -v pacman >/dev/null 2>&1; then
-                pacman -Syu --noconfirm incus
-                service_manager enable incus
-            service_manager start incus
+                pacman -Syu --noconfirm incus || return 1
+                service_manager enable incus || return 1
+                service_manager start incus || return 1
             else
-                $PACKAGETYPE_INSTALL incus
-                if [[ $? -ne 0 ]]; then
-                    echo "无法识别包管理器，请手动安装 incus | Unable to recognize package manager, please install incus manually."
-                else
-                    service_manager enable incus
-            service_manager start incus
-                fi
+                $PACKAGETYPE_INSTALL incus || return 1
+                service_manager enable incus || return 1
+                service_manager start incus || return 1
             fi
         fi
     else
         echo "incus 已经安装 | incus is already installed"
     fi
+    command -v incus >/dev/null 2>&1 || {
+        _red "Incus installation did not provide the incus client"
+        return 1
+    }
+    incus --version >/dev/null 2>&1 || return 1
 }
 
 setup_firewall() {
     if command -v apt >/dev/null 2>&1; then
-        install_package ufw
-        ufw disable || true
+        install_package ufw || return 1
+        ufw disable || _yellow "ufw could not be disabled; verify forwarding rules manually"
         service_manager stop firewalld 2>/dev/null || true
         service_manager disable firewalld 2>/dev/null || true
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
-        install_package epel-release
-        install_package firewalld
-        service_manager enable firewalld
-        service_manager start firewalld
+        if [ "${SYSTEM:-}" != "Fedora" ]; then
+            install_package epel-release || _yellow "Optional EPEL repository unavailable; using configured repositories"
+        fi
+        install_package firewalld || return 1
+        service_manager enable firewalld || return 1
+        service_manager start firewalld || return 1
     fi
-    install_package lsb_release
-    install_package uidmap
-    install_package sipcalc
+    # OS detection also uses /etc/os-release; this convenience command is
+    # absent from some supported RPM repositories.
+    install_lsb_release || _yellow "lsb_release unavailable; using /etc/os-release"
+    install_uidmap || return 1
+    install_package sipcalc || return 1
 }
 
 get_available_space() {
@@ -949,7 +1081,7 @@ create_storage_pool_with_custom_path() {
         _yellow "An existing $pool_name storage pool was found; preserving and reusing it"
         return 0
     fi
-    mkdir -p "$storage_path"
+    mkdir -p "$storage_path" || return 1
     if [ "$backend" = "lvm" ]; then
         loop_file="$storage_path/lvm_pool.img"
         _green "创建 LVM 存储池..."
@@ -964,13 +1096,13 @@ create_storage_pool_with_custom_path() {
             return 1
         fi
         _green "设置循环设备..."
-        loop_dev=$(losetup -f)
-        losetup "$loop_dev" "$loop_file"
+        loop_dev=$(losetup -f) || return 1
+        losetup "$loop_dev" "$loop_file" || return 1
         _green "创建 LVM 物理卷和卷组..."
-        pvcreate "$loop_dev" >/dev/null 2>&1
-        vgcreate incus_vg "$loop_dev" >/dev/null 2>&1
-        echo "$loop_file" > "$storage_path/lvm_loop_file.txt"
-        create_lvm_restore_service "$loop_file"
+        pvcreate "$loop_dev" >/dev/null 2>&1 || return 1
+        vgcreate incus_vg "$loop_dev" >/dev/null 2>&1 || return 1
+        printf '%s\n' "$loop_file" > "$storage_path/lvm_loop_file.txt" || return 1
+        create_lvm_restore_service "$loop_file" || return 1
         temp=$(incus storage create "$pool_name" lvm source=incus_vg 2>&1)
         status=$?
     elif [ "$backend" = "btrfs" ]; then
@@ -993,21 +1125,30 @@ create_storage_pool_with_custom_path() {
             return 1
         fi
         _green "格式化为 btrfs..."
-        mkfs.btrfs -f "$loop_file" >/dev/null 2>&1
-        mkdir -p "$mount_point"
+        mkfs.btrfs -f "$loop_file" >/dev/null 2>&1 || return 1
+        mkdir -p "$mount_point" || return 1
         _green "挂载到 $mount_point..."
-        mount -o loop "$loop_file" "$mount_point"
+        if ! mount -o loop "$loop_file" "$mount_point"; then
+            _red "挂载失败！"
+            _red "Mount failed!"
+            return 1
+        fi
         if ! mountpoint -q "$mount_point"; then
             _red "挂载失败！"
             _red "Mount failed!"
             return 1
         fi
         if ! grep -q "$loop_file" /etc/fstab 2>/dev/null; then
-            echo "$loop_file $mount_point btrfs loop 0 0" >> /etc/fstab
+            if ! printf '%s\n' "$loop_file $mount_point btrfs loop 0 0" >> /etc/fstab; then
+                _red "无法写入 /etc/fstab，取消 btrfs 存储池创建"
+                umount "$mount_point" 2>/dev/null || true
+                rm -f -- "$loop_file"
+                return 1
+            fi
             _green "已添加到 /etc/fstab 实现开机自动挂载"
             _green "Added to /etc/fstab for automatic mounting on boot"
         fi
-        chmod 711 "$mount_point"
+        chmod 711 "$mount_point" || return 1
         temp=$(incus storage create "$pool_name" btrfs source="$mount_point" 2>&1)
         status=$?
     elif [ "$backend" = "zfs" ]; then
@@ -1030,15 +1171,15 @@ create_storage_pool_with_custom_path() {
             return 1
         fi
         _green "创建 ZFS pool..."
-        zpool create -f "$zpool_name" "$loop_file" >/dev/null 2>&1
+        zpool create -f "$zpool_name" "$loop_file" >/dev/null 2>&1 || return 1
         if ! zpool list "$zpool_name" >/dev/null 2>&1; then
             _red "ZFS pool 创建失败！"
             _red "ZFS pool creation failed!"
             return 1
         fi
-        echo "$loop_file" > "$storage_path/zfs_loop_file.txt"
-        echo "$zpool_name" > "$storage_path/zfs_pool_name.txt"
-        create_zfs_restore_service "$loop_file" "$zpool_name"
+        printf '%s\n' "$loop_file" > "$storage_path/zfs_loop_file.txt" || return 1
+        printf '%s\n' "$zpool_name" > "$storage_path/zfs_pool_name.txt" || return 1
+        create_zfs_restore_service "$loop_file" "$zpool_name" || return 1
         temp=$(incus storage create "$pool_name" zfs source="$zpool_name" 2>&1)
         status=$?
     elif [ "$backend" = "dir" ]; then
@@ -1059,7 +1200,7 @@ init_storage_backend() {
     if existing_pool=$(active_storage_pool); then
         _yellow "检测到现有 $existing_pool 存储池，将保留并复用它"
         _yellow "An existing $existing_pool storage pool was found; preserving and reusing it"
-        record_storage_pool "$existing_pool"
+        record_storage_pool "$existing_pool" || return 1
         return 0
     fi
     if is_storage_tried "$backend"; then
@@ -1072,7 +1213,7 @@ init_storage_backend() {
         _green "Using default dir type with unlimited storage pool size"
         echo "dir" >/usr/local/bin/incus_storage_type
         if [ -n "$storage_path" ]; then
-            mkdir -p "$storage_path"
+            mkdir -p "$storage_path" || return 1
             if initialize_custom_storage_pool "$backend"; then
                 record_tried_storage "$backend"
                 return 0
@@ -1082,7 +1223,7 @@ init_storage_backend() {
         else
             # 默认挂载到 /var/lib/incus/storage-pools/default
             if incus admin init --storage-backend "$backend" --auto && storage_pool_exists default; then
-                record_storage_pool default
+                record_storage_pool default || return 1
                 record_tried_storage "$backend"
                 return 0
             fi
@@ -1096,7 +1237,10 @@ init_storage_backend() {
     if [ "$backend" = "btrfs" ] && ! is_storage_installed "btrfs" && ! command -v btrfs >/dev/null; then
         _yellow "正在安装 btrfs-progs..."
         _yellow "Installing btrfs-progs..."
-        $PACKAGETYPE_INSTALL btrfs-progs
+        $PACKAGETYPE_INSTALL btrfs-progs || {
+            _red "btrfs-progs 安装失败，停止存储初始化"
+            return 1
+        }
         record_installed_storage "btrfs"
         modprobe btrfs || true
         _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
@@ -1106,7 +1250,10 @@ init_storage_backend() {
     elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" && ! command -v lvm >/dev/null; then
         _yellow "正在安装 lvm2..."
         _yellow "Installing lvm2..."
-        $PACKAGETYPE_INSTALL lvm2
+        $PACKAGETYPE_INSTALL lvm2 || {
+            _red "lvm2 安装失败，停止存储初始化"
+            return 1
+        }
         record_installed_storage "lvm"
         modprobe dm-mod || true
         _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
@@ -1116,7 +1263,10 @@ init_storage_backend() {
     elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" && ! command -v zfs >/dev/null; then
         _yellow "正在安装 zfsutils-linux..."
         _yellow "Installing zfsutils-linux..."
-        $PACKAGETYPE_INSTALL zfsutils-linux
+        $PACKAGETYPE_INSTALL zfsutils-linux || {
+            _red "zfsutils-linux 安装失败，停止存储初始化"
+            return 1
+        }
         record_installed_storage "zfs"
         modprobe zfs || true
         _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
@@ -1126,7 +1276,10 @@ init_storage_backend() {
     elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" && ! command -v ceph >/dev/null; then
         _yellow "正在安装 ceph-common..."
         _yellow "Installing ceph-common..."
-        $PACKAGETYPE_INSTALL ceph-common
+        $PACKAGETYPE_INSTALL ceph-common || {
+            _red "ceph-common 安装失败，停止存储初始化"
+            return 1
+        }
         record_installed_storage "ceph"
     fi
     if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" && ! grep -q btrfs /proc/filesystems; then
@@ -1137,13 +1290,16 @@ init_storage_backend() {
         modprobe zfs || true
     fi
     if [ "$need_reboot" = true ]; then
-        exit 1
+        # A missing optional kernel module must not abort the whole installer.
+        # Leave the marker for a later retry and let setup_storage try the next
+        # backend (ultimately dir) so IPv4 container creation remains usable.
+        return 1
     fi
     local temp
     if existing_pool=$(active_storage_pool); then
         _yellow "检测到现有 $existing_pool 存储池，将保留并复用它"
         _yellow "An existing $existing_pool storage pool was found; preserving and reusing it"
-        record_storage_pool "$existing_pool"
+        record_storage_pool "$existing_pool" || return 1
         echo "Existing $existing_pool storage pool preserved"
         return 0
     fi
@@ -1163,7 +1319,7 @@ init_storage_backend() {
         temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
         status=$?
         if [ "$status" -eq 0 ] && storage_pool_exists default; then
-            record_storage_pool default
+            record_storage_pool default || return 1
         fi
     fi
     _green "Init storage:"
@@ -1186,7 +1342,7 @@ init_storage_backend() {
             temp=$(incus admin init --storage-backend "$backend" --storage-create-loop "$disk_nums" --storage-pool default --auto 2>&1)
             status=$?
             if [ "$status" -eq 0 ] && storage_pool_exists default; then
-                record_storage_pool default
+                record_storage_pool default || return 1
             fi
         fi
         echo "$temp"
@@ -1205,28 +1361,39 @@ init_storage_backend() {
 }
 
 setup_storage() {
-    local existing_pool
+    local existing_pool pool_status
     if existing_pool=$(active_storage_pool); then
         _green "检测到现有 $existing_pool 存储池，跳过后端重新初始化"
         _green "An existing $existing_pool storage pool was found; skipping backend reinitialization"
-        record_storage_pool "$existing_pool"
+        record_storage_pool "$existing_pool" || return 1
         return 0
+    else
+        pool_status=$?
+        [ "$pool_status" -eq 1 ] || return "$pool_status"
     fi
     if [ -f "/usr/local/bin/incus_storage_type" ]; then
         current_backend=$(cat /usr/local/bin/incus_storage_type)
         if [ "$current_backend" = "btrfs" ] && [ -f "/etc/fstab" ]; then
-            grep "btrfs_pool.img" /etc/fstab 2>/dev/null | while read -r line; do
+            local storage_recovery_failed=false
+            while read -r line; do
                 mount_point=$(echo "$line" | awk '{print $2}')
                 if [ -n "$mount_point" ] && [ -d "$mount_point" ]; then
                     if ! mountpoint -q "$mount_point" 2>/dev/null; then
                         _yellow "检测到未挂载的 btrfs 存储池，正在重新挂载..."
                         _yellow "Detected unmounted btrfs storage pool, remounting..."
-                        mount "$mount_point" 2>/dev/null || true
+                        if ! mount "$mount_point" 2>/dev/null || ! mountpoint -q "$mount_point" 2>/dev/null; then
+                            storage_recovery_failed=true
+                        fi
                     fi
                 fi
-            done
+            done < <(grep "btrfs_pool.img" /etc/fstab 2>/dev/null || true)
+            if [ "$storage_recovery_failed" = true ]; then
+                _red "无法恢复 Incus btrfs 存储挂载，停止以保护现有数据"
+                return 1
+            fi
         elif [ "$current_backend" = "lvm" ]; then
             if ! vgs incus_vg >/dev/null 2>&1; then
+                local storage_recovery_failed=false
                 for storage_dir in /data/incus-storage /var/lib/incus-storage /root/incus-storage; do
                     lvm_info="$storage_dir/lvm_loop_file.txt"
                     if [ -f "$lvm_info" ]; then
@@ -1235,14 +1402,20 @@ setup_storage() {
                             _yellow "检测到 LVM 存储池未激活，正在恢复..."
                             _yellow "Detected inactive LVM storage pool, recovering..."
                             loop_dev=$(losetup -f)
-                            losetup "$loop_dev" "$loop_file" 2>/dev/null || true
-                            vgchange -ay incus_vg 2>/dev/null || true
+                            if ! losetup "$loop_dev" "$loop_file" 2>/dev/null || ! vgchange -ay incus_vg 2>/dev/null; then
+                                storage_recovery_failed=true
+                            fi
                             break
                         fi
                     fi
                 done
+                if [ "$storage_recovery_failed" = true ]; then
+                    _red "无法恢复 Incus LVM 存储，停止以保护现有数据"
+                    return 1
+                fi
             fi
         elif [ "$current_backend" = "zfs" ]; then
+            local storage_recovery_failed=false
             for storage_dir in /data/incus-storage /var/lib/incus-storage /root/incus-storage; do
                 zfs_pool_info="$storage_dir/zfs_pool_name.txt"
                 zfs_loop_info="$storage_dir/zfs_loop_file.txt"
@@ -1253,13 +1426,18 @@ setup_storage() {
                         if ! zpool list "$zpool_name" >/dev/null 2>&1; then
                             _yellow "检测到 ZFS 存储池未导入，正在恢复..."
                             _yellow "Detected ZFS storage pool not imported, recovering..."
-                            zpool import "$zpool_name" 2>/dev/null || \
-                                zpool import -d "$(dirname "$loop_file")" "$zpool_name" 2>/dev/null || true
+                            if ! zpool import "$zpool_name" 2>/dev/null && ! zpool import -d "$(dirname "$loop_file")" "$zpool_name" 2>/dev/null; then
+                                storage_recovery_failed=true
+                            fi
                         fi
                         break
                     fi
                 fi
             done
+            if [ "$storage_recovery_failed" = true ]; then
+                _red "无法恢复 Incus ZFS 存储，停止以保护现有数据"
+                return 1
+            fi
         fi
     fi
     
@@ -1306,11 +1484,11 @@ setup_storage() {
     _yellow "All storage types failed, using dir as fallback"
     echo "dir" >/usr/local/bin/incus_storage_type
     if [ -n "$storage_path" ]; then
-        mkdir -p "$storage_path"
+        mkdir -p "$storage_path" || return 1
         initialize_custom_storage_pool dir
     else
         if incus admin init --storage-backend dir --auto && storage_pool_exists default; then
-            record_storage_pool default
+            record_storage_pool default || return 1
             return 0
         fi
         return 1
@@ -1419,8 +1597,8 @@ download_preconfigured_files() {
         while (( attempt <= max_attempts )); do
             echo "Downloading $filename (attempt $attempt)..."
             if curl -fsSLk "${cdn_success_url}${file}" -o "$filename"; then
-                chmod 755 "$filename"
-                dos2unix "$filename"
+                chmod 755 "$filename" || return 1
+                dos2unix "$filename" || return 1
                 success=1
                 break
             else
@@ -1437,24 +1615,131 @@ download_preconfigured_files() {
     done
 }
 
-configure_incus_settings() {
-    incus config unset images.auto_update_interval
-    incus config set images.auto_update_interval 0
-    incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1
-    if incus network list 2>/dev/null | grep -q incusbr0; then
-        incus network set incusbr0 ipv6.address auto
-        incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
-        incus network set incusbr0 dns.mode managed
-        incus network set incusbr0 ipv4.dhcp true
-        incus network set incusbr0 ipv6.dhcp true
-    else
-        _yellow "警告：incusbr0 网络不存在，跳过网络配置"
-        _yellow "Warning: incusbr0 network does not exist, skipping network configuration"
+# Storage initialization can be skipped on a reused host; profile and network
+# initialization must still run. Only add missing devices/settings and preserve
+# existing pools, custom NICs, addresses and explicit IPv6 disablement.
+ensure_runtime_network() {
+    local pool profiles profile roots root_pool nics nic network bridge="incusbr0" networks config value
+    command -v jq >/dev/null 2>&1 || { _red "jq is required to verify initialization"; return 1; }
+    incus info >/dev/null 2>&1 || { _red "Incus daemon is unavailable"; return 1; }
+    pool=$(active_storage_pool) || { _red "No unambiguous usable storage pool"; return 1; }
+    profiles=$(incus profile list --format csv -c n) || return 1
+    if ! grep -Fxq default <<< "$profiles"; then
+        incus profile create default || return 1
     fi
+    profile=$(incus query /1.0/profiles/default | api_metadata) || return 1
+    roots=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "disk" and .value.path == "/")] | length' <<< "$profile") || return 1
+    if [ "$roots" -eq 0 ]; then
+        if jq -e '.devices.root != null' <<< "$profile" >/dev/null; then
+            _red "default profile device root is already used; leaving it unchanged"
+            return 1
+        fi
+        incus profile device add default root disk path=/ pool="$pool" || return 1
+    elif [ "$roots" -eq 1 ]; then
+        root_pool=$(jq -r '.devices[] | select(.type == "disk" and .path == "/") | .pool // empty' <<< "$profile")
+        if [ -z "$root_pool" ] || ! storage_pool_exists "$root_pool"; then
+            _red "default profile root refers to an unavailable pool; leaving it unchanged"
+            return 1
+        fi
+    else
+        _red "default profile has multiple root disks; leaving it unchanged"
+        return 1
+    fi
+
+    nics=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "nic")] | length' <<< "$profile") || return 1
+    if [ "$nics" -gt 0 ]; then
+        # Custom NIC layouts are user configuration. Validate their referenced
+        # resources without replacing them with the installer's default bridge.
+        while IFS= read -r nic; do
+            network=$(jq -r '.network // empty' <<< "$nic")
+            if [ "$network" = "$bridge" ]; then
+                continue # A missing installer bridge is repaired below.
+            elif [ "$network" = "none" ]; then
+                # `none` is a valid explicit Incus profile choice; preserve
+                # it without looking for a network object of that name.
+                continue
+            elif [ -n "$network" ]; then
+                incus network show "$network" >/dev/null || return 1
+            else
+                network=$(jq -r '.parent // empty' <<< "$nic")
+                [ -z "$network" ] || [ "$network" = "$bridge" ] || ip link show dev "$network" >/dev/null || return 1
+            fi
+        done < <(jq -c '.devices[] | select(.type == "nic")' <<< "$profile")
+        if ! jq -e --arg bridge "$bridge" '.devices[] | select(.type == "nic" and (.network == $bridge or .parent == $bridge))' <<< "$profile" >/dev/null; then
+            _yellow "Preserving the custom default-profile network; ensuring the installer bridge separately"
+        fi
+    elif jq -e '.devices.eth0 != null' <<< "$profile" >/dev/null; then
+        _red "default profile device eth0 is already used; leaving it unchanged"
+        return 1
+    fi
+
+    networks=$(incus network list --format csv -c n) || return 1
+    if ! grep -Fxq "$bridge" <<< "$networks"; then
+        if ip link show dev "$bridge" >/dev/null 2>&1; then
+            _red "$bridge already exists outside Incus; refusing to replace it"
+            return 1
+        fi
+        # IPv4 is required for the default NAT setup. IPv6 is optional.
+        incus network create "$bridge" ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none || return 1
+        incus network set "$bridge" ipv6.address auto || _yellow "IPv6 unavailable; retaining IPv4 networking"
+    fi
+    config=$(incus query "/1.0/networks/$bridge" | api_metadata) || return 1
+    jq -e '.type == "bridge" and .managed == true' <<< "$config" >/dev/null || {
+        _red "$bridge is not a managed bridge"; return 1;
+    }
+    for value in ipv4.address ipv4.dhcp ipv4.nat; do
+        network=$(jq -r --arg key "$value" '.config[$key] // empty' <<< "$config") || return 1
+        if [ -z "$network" ]; then
+            if [ "$value" = ipv4.address ]; then
+                incus network set "$bridge" "$value" auto || return 1
+            else
+                incus network set "$bridge" "$value" true || return 1
+            fi
+        elif { [ "$value" = ipv4.address ] && [ "$network" = none ]; } ||
+             { [ "$value" = ipv4.dhcp ] && [ "$network" = false ]; }; then
+            _red "$bridge explicitly disables $value; default IPv4 NAT is unavailable (setting preserved)"
+            return 1
+        fi
+    done
+    if [ "$nics" -eq 0 ]; then
+        incus profile device add default eth0 nic network="$bridge" name=eth0 || return 1
+    fi
+    # Incus may report the managed network ready just before the bridge is
+    # visible in the host link table. Give udev/netlink a short bounded window
+    # before declaring initialization failed.
+    local link_attempt=0
+    while ! ip link show dev "$bridge" >/dev/null 2>&1; do
+        link_attempt=$((link_attempt + 1))
+        if [ "$link_attempt" -ge 10 ]; then
+            _red "$bridge has no host interface"
+            return 1
+        fi
+        sleep 1
+    done
+    _green "Incus storage, default profile and $bridge are ready"
+}
+
+configure_incus_settings() {
+    ensure_runtime_network || return 1
+    # Set managed DNS only when the bridge has no explicit choice. Preserve
+    # administrators' `none`, `dynamic`, or custom DNS configuration.
+    local network_config dns_mode
+    network_config=$(incus query "/1.0/networks/incusbr0" | api_metadata) || return 1
+    dns_mode=$(jq -r '.config["dns.mode"] // empty' <<< "$network_config") || return 1
+    if [ -z "$dns_mode" ]; then
+        incus network set incusbr0 dns.mode managed || return 1
+    fi
+    incus config set images.auto_update_interval 0 || return 1
+    incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1 ||
+        _yellow "Optional image remote opsmaru already exists or is unavailable"
 }
 
 optimize_system() {
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    command -v sysctl >/dev/null 2>&1 || {
+        _red "sysctl is required to enable IPv4 forwarding"
+        return 1
+    }
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null || return 1
     SYSCTL_CONF="/etc/sysctl.conf"
     SYSCTL_D_CONF="/etc/sysctl.d/99-custom.conf"
     if [ -f "$SYSCTL_CONF" ]; then
@@ -1464,18 +1749,11 @@ optimize_system() {
             echo "net.ipv4.ip_forward=1" >>"$SYSCTL_CONF"
         fi
     fi
-    mkdir -p /etc/sysctl.d
+    mkdir -p /etc/sysctl.d || return 1
     if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
-        echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
+        echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF" || return 1
     fi
-    # Check if sysctl supports --system option (not available in BusyBox)
-    if sysctl --help 2>&1 | grep -q -- '--system'; then
-        sysctl --system >/dev/null 2>&1
-    else
-        # BusyBox or minimal sysctl: apply settings manually
-        sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
-        sysctl -p "$SYSCTL_D_CONF" >/dev/null 2>&1 || true
-    fi
+    apply_forwarding_config "$SYSCTL_D_CONF" || return 1
     if [ -f "/etc/security/limits.conf" ]; then
         grep -Fq "*          hard    nproc       unlimited" /etc/security/limits.conf || \
             echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
@@ -1490,21 +1768,26 @@ optimize_system() {
         sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf
         service_manager restart networking 2>/dev/null || true
     fi
+    return 0
 }
 
 install_dns_checker() {
+    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+        _yellow "No systemd installation detected; skipping optional DNS checker"
+        return 0
+    fi
     if [ ! -f /usr/local/bin/check-dns.sh ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.sh -O /usr/local/bin/check-dns.sh
-        chmod +x /usr/local/bin/check-dns.sh
+        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.sh" -O /usr/local/bin/check-dns.sh || return 1
+        chmod +x /usr/local/bin/check-dns.sh || return 1
     else
         echo "Script already exists. Skipping installation."
     fi
     if [ ! -f /etc/systemd/system/check-dns.service ]; then
-        wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.service -O /etc/systemd/system/check-dns.service
-        chmod +x /etc/systemd/system/check-dns.service
-        service_manager daemon-reload
-        service_manager enable check-dns.service
-        service_manager start check-dns.service
+        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.service" -O /etc/systemd/system/check-dns.service || return 1
+        chmod +x /etc/systemd/system/check-dns.service || return 1
+        service_manager daemon-reload || return 1
+        service_manager enable check-dns.service || return 1
+        service_manager start check-dns.service || return 1
     else
         echo "Service already exists. Skipping installation."
     fi
@@ -1527,8 +1810,9 @@ ensure_nftables() {
 
 ensure_iptables_persistent() {
     if command -v apt >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || return 1
     fi
+    return 0
 }
 
 save_firewall_rules() {
@@ -1537,10 +1821,29 @@ save_firewall_rules() {
         # Saving 'nft list ruleset' would include incusd's transient tables which
         # reference interfaces (incusbr0) that don't exist at nftables.service
         # start time, causing firewall/SSH breakage on reboot.
-        {
-            nft list table inet incus_masq 2>/dev/null || true
-            nft list table inet incus_block 2>/dev/null || true
-        } > /etc/nftables.conf
+        local nft_file=/etc/nftables.d/oneclickvirt-incus.nft
+        local tables rules block_rules="" temporary
+        tables=$(nft list tables) || return 1
+        rules=$(nft list table inet incus_masq) || return 1
+        if grep -Fxq 'table inet incus_block' <<<"$tables"; then
+            block_rules=$(nft list table inet incus_block) || return 1
+        fi
+        mkdir -p /etc/nftables.d || return 1
+        temporary=$(mktemp /etc/nftables.d/.oneclickvirt-incus.XXXXXX) || return 1
+        # Prepare the full snapshot before replacing our file. A read failure
+        # must not truncate the last working persistent rules.
+        local saved_rules=('#!/usr/sbin/nft -f' 'add table inet incus_masq' 'flush table inet incus_masq' "$rules")
+        if [ -n "$block_rules" ]; then
+            saved_rules+=('add table inet incus_block' 'flush table inet incus_block' "$block_rules")
+        fi
+        if ! printf '%s\n' "${saved_rules[@]}" >"$temporary" || ! chmod 644 "$temporary" || ! mv -f "$temporary" "$nft_file"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        # Keep host rules and other runtimes' includes in the main config.
+        if ! grep -Eq '^[[:space:]]*include[[:space:]]+"/etc/nftables.d/(oneclickvirt-incus|\*)\.nft"' /etc/nftables.conf 2>/dev/null; then
+            printf '\n%s\n' 'include "/etc/nftables.d/oneclickvirt-incus.nft"' >>/etc/nftables.conf || return 1
+        fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl enable nftables 2>/dev/null || true
         fi
@@ -1570,12 +1873,12 @@ add_nft_rule_once() {
     local chain="$3"
     local pattern="$4"
     shift 4
-    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || true
+    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || return 1
 }
 
 add_iptables_masq_once() {
     iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null ||
-        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || return 1
 }
 
 setup_iptables() {
@@ -1586,59 +1889,53 @@ setup_iptables() {
     fi
     if ensure_nftables; then
         # Use nftables for MASQUERADE (handles both IPv4 and IPv6)
-        nft add table inet incus_masq 2>/dev/null || true
-        nft add chain inet incus_masq postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-        add_nft_rule_once inet incus_masq postrouting 'oifname != "incusbr0" masquerade' oifname != "incusbr0" masquerade
-        save_firewall_rules
+        nft add table inet incus_masq 2>/dev/null || nft list table inet incus_masq >/dev/null 2>&1 || return 1
+        nft add chain inet incus_masq postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null ||
+            nft list chain inet incus_masq postrouting >/dev/null 2>&1 || return 1
+        add_nft_rule_once inet incus_masq postrouting 'oifname != "incusbr0" masquerade' oifname != "incusbr0" masquerade || return 1
+        save_firewall_rules || return 1
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --zone=public --add-masquerade
-        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent
-        firewall-cmd --reload
+        firewall-cmd --permanent --zone=public --add-masquerade || return 1
+        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent || return 1
+        firewall-cmd --reload || return 1
     else
         # Fallback to iptables with persistence
-        install_package iptables
-        ensure_iptables_persistent
-        add_iptables_masq_once
-        save_firewall_rules
+        install_package iptables || return 1
+        ensure_iptables_persistent || return 1
+        add_iptables_masq_once || return 1
+        save_firewall_rules || return 1
     fi
 }
 
 configure_uid_gid() {
-  check_sed_extended_regex
-  check_grep_extended_regex
   local UID_RANGE="${1:-100000:65536}"
   local FILES=(/etc/subuid /etc/subgid)
-  local USERS=(root)
+  local FILE
   if [[ ! "$UID_RANGE" =~ ^[0-9]+:[0-9]+$ ]]; then
     echo "Error: UID_RANGE '$UID_RANGE' is not in 'start:count' numeric format." >&2
     return 1
   fi
   for FILE in "${FILES[@]}"; do
-    sudo touch "$FILE"
-    for USER_NAME in "${USERS[@]}"; do
-      sudo sed -i $SED_EXTENDED "/^${USER_NAME}:[0-9]+:[0-9]+/d" "$FILE"
-    done
-    for USER_NAME in "${USERS[@]}"; do
-      if getent passwd "$USER_NAME" > /dev/null; then
-        # Only print once for both files to avoid duplicate messages
-        if [ "$FILE" = "/etc/subuid" ]; then
-          echo "Setting subuid/subgid for $USER_NAME: $UID_RANGE"
-        fi
-        echo "${USER_NAME}:${UID_RANGE}" | sudo tee -a "$FILE" >/dev/null
-      else
-        echo "Warning: user '$USER_NAME' does not exist; skipping $FILE." >&2
-      fi
-    done
+    touch "$FILE" || return 1
+    # Existing containers may use a custom range (or several ranges). Replacing
+    # it on a repeated install can make those containers impossible to start.
+    if grep -Eq '^root:[0-9]+:[0-9]+$' "$FILE"; then
+        continue
+    fi
+    if grep -q '^root:' "$FILE"; then
+        _red "Invalid existing root ID mapping in $FILE; preserving it for manual repair"
+        return 1
+    fi
+    printf 'root:%s\n' "$UID_RANGE" >>"$FILE" || return 1
   done
-  safe_grep "^($(IFS="|"; echo "${USERS[*]}")):" /etc/subuid /etc/subgid || true
 }
 
 copy_scripts_to_system() {
     local script
     for script in ssh_sh.sh ssh_bash.sh config.sh image_lookup.sh buildct.sh buildvm.sh instance_ops.sh macvlan.sh; do
         if [ -f "/root/$script" ]; then
-            cp "/root/$script" /usr/local/bin/
-            chmod 755 "/usr/local/bin/$script"
+            cp "/root/$script" /usr/local/bin/ || return 1
+            chmod 755 "/usr/local/bin/$script" || return 1
         fi
     done
 }
@@ -1647,27 +1944,27 @@ main() {
     init_env
     load_storage_state
     statistics_of_run_times
-    install_dependencies
+    install_dependencies || return 1
     rebuild_cloud_init
     check_cdn_file
-    install_incus
-    setup_firewall
+    install_incus || return 1
+    incus admin waitready --timeout=120 || return 1
+    setup_firewall || return 1
     get_user_inputs
-    setup_storage
+    setup_storage || return 1
     service_manager start incus 2>/dev/null || true
     sleep 3
-    configure_incus_settings
-    optimize_system
-    setup_iptables
-    configure_uid_gid
-    download_preconfigured_files
-    copy_scripts_to_system
-    service_manager enable incus
-    service_manager restart incus
-    sleep 6
-    service_manager stop incus
-    sleep 6
-    install_dns_checker
+    configure_incus_settings || return 1
+    optimize_system || return 1
+    setup_iptables || return 1
+    configure_uid_gid || return 1
+    download_preconfigured_files || return 1
+    copy_scripts_to_system || return 1
+    service_manager enable incus || return 1
+    service_manager restart incus || return 1
+    incus admin waitready --timeout=120 || return 1
+    ensure_runtime_network || return 1
+    install_dns_checker || return 1
     _green "脚本当天运行次数:${TODAY}，累计运行次数:${TOTAL}"
     _green "Incus Version: $(incus --version)"
     _green "The first startup may take 400~500 seconds at most, please be patient."

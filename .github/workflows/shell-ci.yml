@@ -41,6 +41,10 @@ jobs:
           bash tests/build_ipv6_network_test.sh
           bash tests/build_failure_control_flow_test.sh
           bash tests/storage_pool_preservation_test.sh
+          bash tests/initialization_test.sh
+          bash tests/panel_initialization_test.sh
+          bash tests/platform_dependencies_test.sh
+          bash tests/host_configuration_preservation_test.sh
           bash tests/batch_transaction_test.sh
 
       - name: Check shell lint errors

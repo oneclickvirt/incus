@@ -3,7 +3,7 @@
 # 2025.08.14
 
 cd /root >/dev/null 2>&1 || exit 1
-REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "freebsd")
+REGEX=("debian|astra" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon[[:space:]]+linux" "fedora" "arch" "freebsd")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "FreeBSD")
 CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')" "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(uname -s)")
 SYS="${CMD[0]}"
@@ -26,7 +26,7 @@ for ((int = 0; int < ${#REGEX[@]}; int++)); do
     fi
 done
 if [ ! -d "/usr/local/bin" ]; then
-    mkdir -p /usr/local/bin
+    mkdir -p /usr/local/bin || exit 1
 fi
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
@@ -145,12 +145,10 @@ service_manager() {
             ;;
         daemon-reload)
             if command -v systemctl >/dev/null 2>&1; then
-                systemctl daemon-reload 2>/dev/null
-                executed=true
-                success=true
-            fi
-            if ! $executed; then
-                success=true
+                if systemctl daemon-reload 2>/dev/null; then
+                    executed=true
+                    success=true
+                fi
             fi
             ;;
         is-active)
@@ -194,29 +192,316 @@ else
 fi
 
 install_package() {
-    package_name=$1
-    if command -v $package_name >/dev/null 2>&1; then
-        _green "$package_name has been installed"
-        _green "$package_name 已经安装"
+    local package_name="$1"
+    if [ -z "$package_name" ]; then
+        _red "Package name is empty"
+        return 1
+    fi
+    # Package names (for example libc6-dev) are not executable names. Always
+    # ask the package manager to reconcile them and propagate hard failures.
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_name" >/dev/null ||
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing "$package_name" >/dev/null || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "$package_name" >/dev/null || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "$package_name" >/dev/null || return 1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -S --noconfirm --needed "$package_name" >/dev/null || return 1
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$package_name" >/dev/null || return 1
     else
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get install -y $package_name
-            if [ $? -ne 0 ]; then
-                apt-get install -y $package_name --fix-missing
-            fi
-        elif command -v yum >/dev/null 2>&1; then
-            yum install -y $package_name
-        elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y $package_name
-        elif command -v pacman >/dev/null 2>&1; then
-            pacman -S --noconfirm --needed $package_name
-        elif command -v apk >/dev/null 2>&1; then
-            apk add --no-cache $package_name
+        _red "No supported package manager found for $package_name"
+        return 1
+    fi
+    if [ "$package_name" = "jq" ] && ! command -v jq >/dev/null 2>&1; then
+        _red "jq was installed but is still unavailable"
+        return 1
+    fi
+    if [ "$package_name" = "dos2unix" ] && ! command -v dos2unix >/dev/null 2>&1; then
+        _red "dos2unix was installed but is still unavailable"
+        return 1
+    fi
+    if [ "$package_name" = "uidmap" ] && ! command -v newuidmap >/dev/null 2>&1; then
+        _red "uidmap was installed but newuidmap is unavailable"
+        return 1
+    fi
+    _green "$package_name is ready"
+    return 0
+}
+
+# Other vendor sysctl files can contain unsupported optional keys. Validate
+# the forwarding file we own and the effective value before declaring ready.
+apply_forwarding_config() {
+    local config_file="$1"
+    if sysctl --help 2>&1 | grep -q -- '--system'; then
+        if ! sysctl --system >/dev/null 2>&1; then
+            sysctl -p "$config_file" >/dev/null 2>&1 || return 1
         fi
-        _green "$package_name has attempted to install"
-        _green "$package_name 已尝试安装"
+    else
+        sysctl -p "$config_file" >/dev/null 2>&1 || return 1
+    fi
+    [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ] || {
+        _red "Required IPv4 forwarding is not enabled"
+        return 1
+    }
+}
+
+install_uidmap() {
+    if command -v newuidmap >/dev/null 2>&1 && command -v newgidmap >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        install_package uidmap || return 1
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        install_package shadow-utils || return 1
+    elif command -v apk >/dev/null 2>&1; then
+        install_package shadow-uidmap || install_package shadow || return 1
+    elif command -v pacman >/dev/null 2>&1; then
+        install_package shadow || return 1
+    else
+        _red "No supported package manager found for uidmap"
+        return 1
+    fi
+    if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
+        _red "newuidmap/newgidmap are still unavailable after package installation"
+        return 1
     fi
 }
+
+prepare_package_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf makecache -y >/dev/null || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        yum makecache -y >/dev/null || return 1
+    elif command -v apk >/dev/null 2>&1; then
+        apk update >/dev/null || return 1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm >/dev/null || return 1
+    else
+        _red "No supported package manager found"
+        return 1
+    fi
+}
+
+# panel_init.sh is also used on nodes where the Incus package/daemon was
+# installed separately.  A running daemon does not imply that `incus admin
+# init` has ever completed: package installation can leave an empty server
+# with no storage pool or default profile.  Initialize only when the pool list
+# is empty, and preserve any existing pools and profiles.
+ensure_runtime_storage() {
+    local pools init_output init_status
+    command -v incus >/dev/null 2>&1 || {
+        _red "incus command is unavailable"
+        return 1
+    }
+    incus admin waitready --timeout=120 >/dev/null 2>&1 || {
+        _red "Incus daemon is not ready"
+        return 1
+    }
+    pools=$(incus storage list --format csv -c n 2>/dev/null) || {
+        init_output=$(incus admin init --auto 2>&1)
+        init_status=$?
+        if [ "$init_status" -ne 0 ] && ! grep -Eiq 'already[[:space:]]+(been[[:space:]]+)?initialized|already[[:space:]]+exists|already[[:space:]]+configured' <<<"$init_output"; then
+            printf '%s\n' "$init_output" >&2
+            _red "Incus storage initialization failed"
+            return 1
+        fi
+        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+    }
+    if [ -z "$pools" ]; then
+        init_output=$(incus admin init --auto 2>&1)
+        init_status=$?
+        if [ "$init_status" -ne 0 ] && ! grep -Eiq 'already[[:space:]]+(been[[:space:]]+)?initialized|already[[:space:]]+exists|already[[:space:]]+configured' <<<"$init_output"; then
+            printf '%s\n' "$init_output" >&2
+            _red "Incus storage initialization failed"
+            return 1
+        fi
+        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+    fi
+    if [ -z "$pools" ]; then
+        # Some distro packages mark the daemon initialized while leaving the
+        # storage configuration empty.  A plain dir pool is the least
+        # surprising recovery and keeps container creation usable.
+        incus storage create default dir >/dev/null 2>&1 || return 1
+        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+    fi
+    [ -n "$pools" ] || {
+        _red "Incus has no usable storage pool after initialization"
+        return 1
+    }
+    # Select a pool only when adding a missing root device. An existing
+    # profile may already select a non-default pool among several pools.
+    return 0
+}
+
+select_storage_pool_for_profile() {
+    local pools selected
+    pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+    if grep -Fxq default <<<"$pools"; then
+        selected=default
+    else
+        selected=$(printf '%s\n' "$pools" | tr -d '\r' | awk 'NF { count++; first=$0 } END { if (count == 1) print first }')
+    fi
+    [ -n "${selected:-}" ] || {
+        _red "无法唯一确定 Incus 存储池，拒绝自动接管"
+        return 1
+    }
+    incus storage show "$selected" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$selected"
+}
+
+ensure_default_bridge() {
+    local bridge=incusbr0 networks
+    networks=$(incus network list --format csv -c n 2>/dev/null) || return 1
+    if ! grep -Fxq "$bridge" <<<"$networks"; then
+        if ip link show dev "$bridge" >/dev/null 2>&1; then
+            _red "$bridge 已被宿主机外部设备占用，拒绝替换"
+            return 1
+        fi
+        incus network create "$bridge" ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none || return 1
+        incus network set "$bridge" ipv6.address auto || _yellow "IPv6 setup unavailable; retaining IPv4-only mode"
+    fi
+}
+
+ensure_default_profile_devices() {
+    local profiles profile pool roots nics nic network
+    profiles=$(incus profile list --format csv -c n) || return 1
+    if ! grep -Fxq default <<<"$profiles"; then
+        incus profile create default || return 1
+    fi
+    # Do not turn a failed/empty query into an empty, apparently valid
+    # profile: jq alone can succeed when the command before the pipe fails.
+    profile=$(incus query /1.0/profiles/default) || return 1
+    profile=$(jq -ce 'if (.metadata? | type) == "object" then .metadata else . end | select(type == "object" and (.devices | type) == "object")' <<<"$profile") || return 1
+    roots=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "disk" and .value.path == "/")] | length' <<<"$profile") || return 1
+    if [ "$roots" -eq 0 ]; then
+        jq -e '.devices.root != null' <<<"$profile" >/dev/null && {
+            _red "default profile 的 root 设备已被占用，拒绝覆盖"
+            return 1
+        }
+        pool=$(select_storage_pool_for_profile) || return 1
+        incus profile device add default root disk path=/ pool="$pool" || return 1
+    elif [ "$roots" -eq 1 ]; then
+        pool=$(jq -r '.devices[] | select(.type == "disk" and .path == "/") | .pool // empty' <<<"$profile")
+        [ -n "$pool" ] && incus storage show "$pool" >/dev/null 2>&1 || {
+            _red "default profile 的 root 存储池不可用"
+            return 1
+        }
+    else
+        _red "default profile 存在多个 root 磁盘，拒绝自动修改"
+        return 1
+    fi
+
+    nics=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "nic")] | length' <<<"$profile") || return 1
+    if [ "$nics" -eq 0 ]; then
+        if jq -e '.devices.eth0 != null' <<<"$profile" >/dev/null; then
+            _red "default profile 的 eth0 设备已被占用，拒绝覆盖"
+            return 1
+        fi
+        incus profile device add default eth0 nic network=incusbr0 name=eth0 || return 1
+    else
+        while IFS= read -r nic; do
+            network=$(jq -r '.network // empty' <<<"$nic") || return 1
+            if [ "$network" = incusbr0 ] || [ "$network" = none ]; then
+                continue
+            elif [ -n "$network" ]; then
+                incus network show "$network" >/dev/null 2>&1 || return 1
+            else
+                network=$(jq -r '.parent // empty' <<<"$nic") || return 1
+                [ -z "$network" ] || [ "$network" = incusbr0 ] || ip link show dev "$network" >/dev/null 2>&1 || return 1
+            fi
+        done < <(jq -c '.devices[]? | select(.type == "nic")' <<<"$profile")
+    fi
+}
+
+verify_runtime_network() {
+    local profile network pool ipv4 dhcp
+    command -v incus >/dev/null 2>&1 || { _red "incus command is unavailable"; return 1; }
+    command -v jq >/dev/null 2>&1 || { _red "jq is required to verify Incus"; return 1; }
+    incus info >/dev/null 2>&1 || { _red "Incus daemon is unavailable"; return 1; }
+    network=$(incus query /1.0/networks/incusbr0 2>/dev/null) || { _red "incusbr0 is missing"; return 1; }
+    network=$(printf '%s\n' "$network" | jq -c 'if (.metadata? | type) == "object" then .metadata else . end') || return 1
+    jq -e '.type == "bridge" and .managed == true' <<<"$network" >/dev/null || { _red "incusbr0 is not a managed bridge"; return 1; }
+    ipv4=$(jq -r '.config["ipv4.address"] // empty' <<<"$network") || return 1
+    dhcp=$(jq -r '.config["ipv4.dhcp"] // empty' <<<"$network") || return 1
+    [ -n "$ipv4" ] && [ "$ipv4" != "none" ] && [ "$dhcp" != "false" ] || {
+        _red "incusbr0 does not provide required IPv4 addressing/DHCP"
+        return 1
+    }
+    profile=$(incus query /1.0/profiles/default 2>/dev/null) || { _red "default profile is missing"; return 1; }
+    profile=$(printf '%s\n' "$profile" | jq -c 'if (.metadata? | type) == "object" then .metadata else . end') || return 1
+    pool=$(jq -r '[.devices[]? | select(.type == "disk" and .path == "/") | .pool // empty] | if length == 1 then .[0] else empty end' <<<"$profile") || return 1
+    [ -n "$pool" ] && incus storage show "$pool" >/dev/null 2>&1 || { _red "default profile has no usable root storage pool"; return 1; }
+    local link_attempt=0
+    while ! ip link show dev incusbr0 >/dev/null 2>&1; do
+        link_attempt=$((link_attempt + 1))
+        if [ "$link_attempt" -ge 10 ]; then
+            _red "incusbr0 host interface is missing"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+configure_default_network_settings() {
+    local config ipv4 ipv6 dns_mode raw_dnsmasq dhcp nat
+    ensure_default_bridge || return 1
+    config=$(incus query /1.0/networks/incusbr0) || return 1
+    config=$(jq -ce 'if (.metadata? | type) == "object" then .metadata else . end | select(.type == "bridge" and .managed == true and (.config | type) == "object")' <<<"$config") || return 1
+    ipv4=$(jq -r '.config["ipv4.address"] // empty' <<<"$config") || return 1
+    if [ -z "$ipv4" ]; then
+        incus network set incusbr0 ipv4.address auto || return 1
+    elif [ "$ipv4" = "none" ]; then
+        _red "incusbr0 explicitly disables IPv4 addressing"
+        return 1
+    fi
+    ipv6=$(jq -r '.config["ipv6.address"] // empty' <<<"$config") || return 1
+    if [ -z "$ipv6" ]; then
+        incus network set incusbr0 ipv6.address auto || _yellow "IPv6 setup unavailable; preserving IPv4-only mode"
+    fi
+    dhcp=$(jq -r '.config["ipv4.dhcp"] // empty' <<<"$config") || return 1
+    if [ -z "$dhcp" ]; then
+        incus network set incusbr0 ipv4.dhcp true || return 1
+    elif [ "$dhcp" = "false" ]; then
+        _red "incusbr0 explicitly disables IPv4 DHCP"
+        return 1
+    fi
+    nat=$(jq -r '.config["ipv4.nat"] // empty' <<<"$config") || return 1
+    if [ -z "$nat" ]; then
+        incus network set incusbr0 ipv4.nat true || return 1
+    elif [ "$nat" = "false" ]; then
+        # Routed subnets and installer-managed masquerading can intentionally
+        # disable the daemon's NAT. Preserve that choice, as the main installer does.
+        _yellow "incusbr0 IPv4 NAT is disabled; external routing/NAT must provide connectivity"
+    fi
+    dns_mode=$(jq -r '.config["dns.mode"] // empty' <<<"$config") || return 1
+    if [ -z "$dns_mode" ]; then
+        incus network set incusbr0 dns.mode managed || return 1
+        raw_dnsmasq=$(jq -r '.config["raw.dnsmasq"] // empty' <<<"$config") || return 1
+        if [ -z "$raw_dnsmasq" ]; then
+            incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4 || return 1
+        fi
+    fi
+}
+
+if ! prepare_package_manager; then
+    _red "Package index preparation failed"
+    exit 1
+fi
+for package_name in jq dos2unix curl; do
+    install_package "$package_name" || exit 1
+done
+install_uidmap || exit 1
+
+ensure_runtime_storage || exit 1
+# The installer owns creation of the bridge/profile. Repair only missing
+# defaults here; explicit administrator settings are preserved and validated.
+configure_default_network_settings || exit 1
+ensure_default_profile_devices || exit 1
+verify_runtime_network || exit 1
 
 check_cdn() {
     local o_url=$1
@@ -260,10 +545,6 @@ statistics_of_run_times() {
     fi
 }
 
-install_package uidmap
-
-# 设置自动配置内网IPV6地址
-incus network set incusbr0 ipv6.address auto
 # 下载预制文件
 files=(
     "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_bash.sh"
@@ -274,87 +555,114 @@ files=(
 )
 for file in "${files[@]}"; do
     filename=$(basename "$file")
-    rm -rf "$filename"
+    rm -f -- "$filename" || exit 1
     curl -fsSLk "${cdn_success_url}${file}" -o "$filename" || exit 1
-    chmod 755 "$filename"
-    dos2unix "$filename"
+    chmod 755 "$filename" || exit 1
+    dos2unix "$filename" || exit 1
 done
-cp /root/ssh_sh.sh /usr/local/bin
-cp /root/ssh_bash.sh /usr/local/bin
-cp /root/config.sh /usr/local/bin
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sysctl_path=$(which sysctl)
+cp /root/ssh_sh.sh /usr/local/bin/ || exit 1
+cp /root/ssh_bash.sh /usr/local/bin/ || exit 1
+cp /root/config.sh /usr/local/bin/ || exit 1
+command -v sysctl >/dev/null 2>&1 || exit 1
+sysctl -w net.ipv4.ip_forward=1 >/dev/null || exit 1
 if [ -f "/etc/sysctl.conf" ]; then
     if grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
         # 如果被注释，去掉注释
         sed -i 's/^#\?net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     else
         # 没有则追加
-        echo "net.ipv4.ip_forward=1" >>/etc/sysctl.conf
+        echo "net.ipv4.ip_forward=1" >>/etc/sysctl.conf || exit 1
     fi
 fi
 SYSCTL_D_CONF="/etc/sysctl.d/99-custom.conf"
-mkdir -p /etc/sysctl.d
+mkdir -p /etc/sysctl.d || exit 1
 if ! grep -q "^net.ipv4.ip_forward=1" "$SYSCTL_D_CONF" 2>/dev/null; then
-    echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF"
+    echo "net.ipv4.ip_forward=1" >>"$SYSCTL_D_CONF" || exit 1
 fi
-# Check if sysctl supports --system option (not available in BusyBox)
-if ${sysctl_path} --help 2>&1 | grep -q -- '--system'; then
-    ${sysctl_path} --system >/dev/null 2>&1
-else
-    # BusyBox or minimal sysctl: apply settings manually
-    ${sysctl_path} -p /etc/sysctl.conf >/dev/null 2>&1 || true
-    ${sysctl_path} -p "$SYSCTL_D_CONF" >/dev/null 2>&1 || true
-fi
-incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4
-incus network set incusbr0 dns.mode managed
-# managed none dynamic
-incus network set incusbr0 ipv4.dhcp true
-incus network set incusbr0 ipv6.dhcp true
+apply_forwarding_config "$SYSCTL_D_CONF" || exit 1
 # 解除进程数限制
 if [ -f "/etc/security/limits.conf" ]; then
     if ! grep -Fq "*          hard    nproc       unlimited" /etc/security/limits.conf; then
-        echo '*          hard    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
+        printf '%s\n' '*          hard    nproc       unlimited' >>/etc/security/limits.conf || exit 1
     fi
     if ! grep -Fq "*          soft    nproc       unlimited" /etc/security/limits.conf; then
-        echo '*          soft    nproc       unlimited' | sudo tee -a /etc/security/limits.conf
+        printf '%s\n' '*          soft    nproc       unlimited' >>/etc/security/limits.conf || exit 1
     fi
 fi
 if [ -f "/etc/systemd/logind.conf" ]; then
     if ! grep -q "UserTasksMax=infinity" /etc/systemd/logind.conf; then
-        echo 'UserTasksMax=infinity' | sudo tee -a /etc/systemd/logind.conf
+        printf '%s\n' 'UserTasksMax=infinity' >>/etc/systemd/logind.conf || exit 1
     fi
 fi
 # 环境安装
-# 安装vnstat
-install_package make
-install_package gcc
-install_package libc6-dev
-install_package libsqlite3-0
-install_package libsqlite3-dev
-install_package libgd3
-install_package libgd-dev
+# 安装 vnstat 所需的编译依赖。原脚本使用 Debian 专用包名，导致
+# dnf/yum/apk 节点在面板初始化末尾失败，前面的运行时修复也因此无法
+# 对外报告成功。按实际包管理器选择等价包名。
+install_vnstat_dependencies() {
+    local packages=()
+    if command -v apt-get >/dev/null 2>&1; then
+        packages=(make gcc libc6-dev libsqlite3-0 libsqlite3-dev libgd3 libgd-dev)
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        packages=(make gcc glibc-devel sqlite sqlite-devel gd gd-devel)
+    elif command -v apk >/dev/null 2>&1; then
+        packages=(build-base sqlite-dev gd-dev)
+    elif command -v pacman >/dev/null 2>&1; then
+        packages=(base-devel sqlite gd)
+    else
+        _red "No supported package manager found for vnstat dependencies"
+        return 1
+    fi
+    local package_name
+    for package_name in "${packages[@]}"; do
+        install_package "$package_name" || return 1
+    done
+}
+
+install_vnstat_dependencies || exit 1
 cd /usr/src || exit 1
-wget https://humdi.net/vnstat/vnstat-2.11.tar.gz
-chmod 755 vnstat-2.11.tar.gz
-tar zxvf vnstat-2.11.tar.gz
+curl -fsSL https://humdi.net/vnstat/vnstat-2.11.tar.gz -o vnstat-2.11.tar.gz || exit 1
+chmod 755 vnstat-2.11.tar.gz || exit 1
+tar zxvf vnstat-2.11.tar.gz || exit 1
 cd vnstat-2.11 || exit 1
-./configure --prefix=/usr --sysconfdir=/etc && make && make install
-cp -v examples/systemd/vnstat.service /etc/systemd/system/
-service_manager enable vnstat
-service_manager start vnstat
-pgrep -c vnstatd
-vnstat -v
-vnstatd -v
-vnstati -v
+./configure --prefix=/usr --sysconfdir=/etc && make && make install || exit 1
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cp -v examples/systemd/vnstat.service /etc/systemd/system/ || exit 1
+    service_manager daemon-reload || exit 1
+    service_manager enable vnstat || exit 1
+    service_manager start vnstat || exit 1
+elif command -v rc-update >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1; then
+    # Source builds do not ship an OpenRC unit. Install a minimal one so
+    # Alpine/OpenRC nodes still collect traffic instead of failing init.
+    if [ ! -x /etc/init.d/vnstat ]; then
+        cat > /etc/init.d/vnstat <<'VNSTAT_OPENRC'
+#!/sbin/openrc-run
+name="vnstatd"
+command="/usr/sbin/vnstatd"
+command_args="-n"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+VNSTAT_OPENRC
+        chmod 755 /etc/init.d/vnstat || exit 1
+    fi
+    rc-update add vnstat default >/dev/null 2>&1 || exit 1
+    rc-service vnstat start >/dev/null 2>&1 || exit 1
+else
+    _yellow "No service manager found; vnstat binaries installed but daemon start was skipped"
+fi
+command -v vnstat >/dev/null 2>&1 || exit 1
+command -v vnstatd >/dev/null 2>&1 || exit 1
+command -v vnstati >/dev/null 2>&1 || exit 1
 
 # 加装证书
-wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O ~/.config/incus/client.crt
-chmod 644 ~/.config/incus/client.crt
+mkdir -p ~/.config/incus || exit 1
+curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt" -o ~/.config/incus/client.crt || exit 1
+chmod 644 ~/.config/incus/client.crt || exit 1
 # 双确认，部分版本切换了命令
-incus config trust add ~/.config/incus/client.crt
-incus config trust add-certificate ~/.config/incus/client.crt
-incus config set core.https_address :8443
+if ! incus config trust add ~/.config/incus/client.crt >/dev/null 2>&1; then
+    incus config trust add-certificate ~/.config/incus/client.crt >/dev/null 2>&1 ||
+        incus config trust list >/dev/null 2>&1 || exit 1
+fi
+incus config set core.https_address :8443 || exit 1
 
 # wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/client.crt -O /root/snap/lxd/common/config/client.crt
 # chmod 644 /root/snap/lxd/common/config/client.crt
@@ -362,11 +670,14 @@ incus config set core.https_address :8443
 # incus config set core.https_address :9969
 
 # 加载修改脚本
-wget ${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/modify.sh -O /root/modify.sh
-chmod 755 /root/modify.sh
+curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/panel_scripts/modify.sh" -o /root/modify.sh || exit 1
+chmod 755 /root/modify.sh || exit 1
 ufw disable || true
-incus remote list
-incus remote remove spiritlhl
-incus remote add spiritlhl https://incusimages.spiritlhl.net --protocol simplestreams --public
-incus image list spiritlhl:debian
-incus remote list
+if incus remote list 2>/dev/null | grep -q '^| spiritlhl[[:space:]]*|'; then
+    incus remote remove spiritlhl >/dev/null 2>&1 || _yellow "Could not replace optional spiritlhl remote"
+fi
+incus remote add spiritlhl https://incusimages.spiritlhl.net --protocol simplestreams --public >/dev/null 2>&1 ||
+    _yellow "Optional spiritlhl image remote is already present or unavailable"
+incus image list spiritlhl:debian >/dev/null 2>&1 || _yellow "Optional spiritlhl image listing unavailable"
+verify_runtime_network || exit 1
+exit 0
