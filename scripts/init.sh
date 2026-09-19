@@ -5,6 +5,36 @@
 # ./init.sh NAT服务器前缀 数量
 # 2026.08.30
 
+# Load before changing directory or touching shared downloads and logs.
+load_instance_ownership() {
+    local script_dir helper temporary
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    for helper in "$script_dir/instance_ownership.sh" /usr/local/bin/instance_ownership.sh /root/instance_ownership.sh; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper" || return 1
+            return 0
+        fi
+    done
+    temporary=$(mktemp "${TMPDIR:-/tmp}/incus-ownership.XXXXXX") || return 1
+    if ! curl -fsSL "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ownership.sh" -o "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    . "$temporary"
+    local status=$?
+    rm -f -- "$temporary"
+    return "$status"
+}
+load_instance_ownership || { echo "Missing instance_ownership.sh; download it with this script." >&2; exit 1; }
+OCV_SCRIPT_RUNTIME=incus
+OCV_INSTANCE_CLI=incus
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    ocv_lock_scripts || exit 1
+fi
+
+
 if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
   cd /root >/dev/null 2>&1 || exit 1
   if [ ! -d "/usr/local/bin" ]; then
@@ -24,6 +54,7 @@ incus_storage_pool() {
 batch_active=false
 batch_pending_log=""
 batch_created=()
+batch_identities=()
 
 incus_instance_exists() {
   incus info "$1" >/dev/null 2>&1
@@ -31,21 +62,24 @@ incus_instance_exists() {
 
 track_batch_instance() {
   local candidate="$1"
+  [ -n "${ocv_created_identity:-}" ] || return 1
   local tracked
   for tracked in "${batch_created[@]}"; do
     [ "$tracked" = "$candidate" ] && return 0
   done
   batch_created+=("$candidate")
+  batch_identities+=("$ocv_created_identity")
 }
 
 rollback_batch() {
   local index instance_name
   for ((index = ${#batch_created[@]} - 1; index >= 0; index--)); do
     instance_name="${batch_created[index]}"
-    incus delete --force "$instance_name" >/dev/null 2>&1 || true
+    ocv_remove_owned_instance "$instance_name" "${batch_identities[index]}" || echo "Failed to roll back instance: $instance_name" >&2
   done
   [ -z "$batch_pending_log" ] || rm -f -- "$batch_pending_log"
   batch_created=()
+  batch_identities=()
   batch_pending_log=""
   batch_active=false
 }
@@ -71,6 +105,7 @@ commit_batch_log() {
   mv -f -- "$batch_pending_log" log || return 1
   batch_pending_log=""
   batch_created=()
+  batch_identities=()
   batch_active=false
 }
 
@@ -172,7 +207,7 @@ add_nft_rule_once() {
   local chain="$3"
   local pattern="$4"
   shift 4
-  nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || true
+  nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || return 1
 }
 
 add_iptables_drop_once() {
@@ -180,7 +215,7 @@ add_iptables_drop_once() {
   local proto="$2"
   local port="$3"
   iptables --ipv4 -C FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null ||
-    iptables --ipv4 -I FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null || true
+    iptables --ipv4 -I FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null || return 1
 }
 
 detect_primary_iface() {
@@ -236,11 +271,12 @@ create_base_container() {
               incus image import incus.tar.xz rootfs.squashfs --alias "debian11-${sys_bit}"
               rm -rf incus.tar.xz rootfs.squashfs "$image_file"
               echo "自定义镜像导入成功，创建容器..."
-              if incus init "debian11-${sys_bit}" "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -s "$storage_pool"; then
+              if ocv_create_owned "$prefix" incus init "debian11-${sys_bit}" "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -s "$storage_pool"; then
                   echo "使用自定义镜像创建容器成功"
                   return 0
               else
                   local init_status=$?
+                  [ -z "$ocv_created_identity" ] || return "$init_status"
                   incus_instance_exists "$prefix" && return "$init_status"
               fi
           else
@@ -254,13 +290,14 @@ create_base_container() {
   # 备用方法：使用原有的镜像源
   echo "使用原有方法创建容器..."
   # 在创建时直接设置磁盘大小限制
-  if incus init images:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s "$storage_pool"; then
+  if ocv_create_owned "$prefix" incus init images:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s "$storage_pool"; then
     return 0
   else
     local init_status=$?
+    [ -z "$ocv_created_identity" ] || return "$init_status"
     incus_instance_exists "$prefix" && return "$init_status"
   fi
-  if incus init opsmaru:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s "$storage_pool"; then
+  if ocv_create_owned "$prefix" incus init opsmaru:debian/11 "$prefix" -c limits.cpu=1 -c limits.memory=256MiB -d root,size=1GiB -s "$storage_pool"; then
     return 0
   fi
   echo "基础容器创建失败：所有镜像源均不可用" >&2
@@ -304,16 +341,17 @@ block_ports() {
   iface=$(detect_primary_iface)
   # Try nftables first
   if command -v nft >/dev/null 2>&1; then
-    nft add table inet incus_block 2>/dev/null || true
-    nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+    nft add table inet incus_block 2>/dev/null || return 1
+    nft list chain inet incus_block forward >/dev/null 2>&1 ||
+      nft 'add chain inet incus_block forward { type filter hook forward priority filter; policy accept; }' 2>/dev/null || return 1
     for port in "${blocked_ports[@]}"; do
       add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop
       add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop
     done
     # Only save our own tables, not incusd's managed 'incus' table
-    { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
+    { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf || return 1
     if command -v systemctl >/dev/null 2>&1; then
-      systemctl enable nftables 2>/dev/null || true
+      systemctl enable nftables 2>/dev/null || return 1
     fi
   else
     # Try to install nftables
@@ -325,32 +363,34 @@ block_ports() {
       yum install -y nftables >/dev/null 2>&1
     fi
     if command -v nft >/dev/null 2>&1; then
-      nft add table inet incus_block 2>/dev/null || true
-      nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+      nft add table inet incus_block 2>/dev/null || return 1
+      nft list chain inet incus_block forward >/dev/null 2>&1 ||
+        nft 'add chain inet incus_block forward { type filter hook forward priority filter; policy accept; }' 2>/dev/null || return 1
       for port in "${blocked_ports[@]}"; do
         add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop
         add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop
       done
       # Only save our own tables, not incusd's managed 'incus' table
-      { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf
+      { nft list table inet incus_masq 2>/dev/null || true; nft list table inet incus_block 2>/dev/null || true; } > /etc/nftables.conf || return 1
       if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable nftables 2>/dev/null || true
+        systemctl enable nftables 2>/dev/null || return 1
       fi
     else
       # Final fallback: iptables with persistence
+      command -v iptables >/dev/null 2>&1 || return 1
       for port in "${blocked_ports[@]}"; do
-        add_iptables_drop_once "$iface" tcp "$port"
-        add_iptables_drop_once "$iface" udp "$port"
+        add_iptables_drop_once "$iface" tcp "$port" || return 1
+        add_iptables_drop_once "$iface" udp "$port" || return 1
       done
       if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || return 1
       fi
       if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save 2>/dev/null || true
+        netfilter-persistent save 2>/dev/null || return 1
       fi
       if command -v iptables-save >/dev/null 2>&1; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        mkdir -p /etc/iptables || return 1
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || return 1
       fi
     fi
   fi
@@ -374,7 +414,7 @@ download_scripts() {
 configure_china_mirrors() {
   local container_name=$1
   incus exec "$container_name" -- sh -c 'if command -v yum >/dev/null 2>&1; then yum install -y curl; elif command -v apt-get >/dev/null 2>&1; then apt-get install curl -y --fix-missing; fi' || return 1
-  incus exec "$container_name" -- curl -lk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh || return 1
+  incus exec "$container_name" -- curl -fLk https://gitee.com/SuperManito/LinuxMirrors/raw/main/ChangeMirrors.sh -o ChangeMirrors.sh || return 1
   incus exec "$container_name" -- chmod 755 ChangeMirrors.sh || return 1
   incus exec "$container_name" -- ./ChangeMirrors.sh --source mirrors.tuna.tsinghua.edu.cn --web-protocol http --intranet false --backup true --updata-software false --clean-cache false --ignore-backup-tips > /dev/null || return 1
   incus exec "$container_name" -- rm -rf ChangeMirrors.sh
@@ -471,11 +511,11 @@ create_containers() {
       echo "容器已存在，未修改既有实例：$name" >&2
       return 1
     fi
-    if incus copy "$prefix" "$name"; then
-      track_batch_instance "$name"
+    if ocv_create_owned "$name" incus copy "$prefix" "$name"; then
+      track_batch_instance "$name" || return 1
     else
       local copy_status=$?
-      incus_instance_exists "$name" && track_batch_instance "$name"
+      track_batch_instance "$name" || true
       echo "容器复制失败：${name}，已停止后续创建" >&2
       return "$copy_status"
     fi
@@ -528,10 +568,10 @@ main() {
     return 1
   fi
   if create_base_container "$prefix"; then
-    track_batch_instance "$prefix"
+    track_batch_instance "$prefix" || return 1
   else
     local create_status=$?
-    incus_instance_exists "$prefix" && track_batch_instance "$prefix"
+    track_batch_instance "$prefix" || true
     echo "基础容器创建失败，已停止后续配置" >&2
     cleanup
     return "$create_status"

@@ -51,8 +51,41 @@ storage_pool_exists() {
 # `incus query` returns an API envelope on real daemons while test doubles and
 # older wrappers may return the metadata object directly.  Normalize both
 # forms before inspecting profile/network fields.
+# JSON inventories work on LTS clients whose storage/network list has no -c.
+# Capture the command first so a daemon failure cannot become an empty list.
+runtime_resource_names() {
+    local data
+    data=$(incus "$1" list --format json) || return 1
+    jq -sr '
+        if length != 1 or (.[0] | type) != "array" then error("invalid runtime inventory")
+        else .[0] end |
+        if all(.[]; type == "object" and (.name | type) == "string" and (.name | length) > 0)
+        then .[].name else error("invalid resource name") end
+    ' <<<"$data"
+}
+
 api_metadata() {
-    jq -c 'if type == "object" and ((.metadata? | type) == "object") then .metadata else . end'
+    # Slurp first: jq 1.6 can exit successfully on empty input even with -e.
+    # Exactly one object is required before any default-setting mutation.
+    jq -cs --arg resource "${1:-object}" '
+        if length != 1 or (.[0] | type) != "object"
+        then error("expected one API object") else .[0] end |
+        if has("metadata") then
+            if .type == "sync" and (.metadata | type) == "object"
+               and ((has("status_code") | not) or .status_code == 200)
+            then .metadata else error("invalid API envelope") end
+        elif .type == "error" or .type == "async" or .type == "sync"
+        then error("invalid API response") else . end |
+        if $resource == "profile" then
+            if (.devices | type) == "object"
+               and all(.devices[]; type == "object" and all(.[]; type == "string"))
+            then . else error("invalid profile devices") end
+        elif $resource == "network" then
+            if .type == "bridge" and .managed == true
+               and (.config | type) == "object" and all(.config[]; type == "string")
+            then . else error("invalid managed bridge configuration") end
+        else . end
+    '
 }
 
 valid_storage_pool_name() {
@@ -81,7 +114,7 @@ active_storage_pool() {
         return 0
     fi
     local pools
-    pools=$(incus storage list --format csv -c n) || return 2
+    pools=$(runtime_resource_names storage) || return 2
     if [ -n "$pools" ]; then
         if [[ "$pools" != *$'\n'* ]] && valid_storage_pool_name "$pools" && storage_pool_exists "$pools"; then
             printf '%s\n' "$pools"
@@ -211,11 +244,12 @@ _blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 
 is_noninteractive() {
-    case "${noninteractive:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
-    esac
-    case "${INCUS_NONINTERACTIVE:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    # The canonical flag takes precedence over compatibility aliases, even
+    # when explicitly false. Export it so downloaded child scripts agree.
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-${INCUS_NONINTERACTIVE:-}}}"
+    export noninteractive
+    case "$noninteractive" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
     esac
     return 1
 }
@@ -484,6 +518,24 @@ install_package() {
     fi
 }
 
+# Incus creates managed bridge networks by invoking the host dnsmasq binary.
+# The Debian/Ubuntu Incus package only recommends dnsmasq-base, so a minimal
+# installation can have a working `incus` client but fail during `admin init`
+# with "dnsmasq: executable file not found".  Install the provider package
+# explicitly and verify the executable before attempting initialization.
+install_dnsmasq() {
+    command -v dnsmasq >/dev/null 2>&1 && return 0
+    local package_name=dnsmasq
+    if [ "$PACKAGETYPE" = apt ]; then
+        package_name=dnsmasq-base
+    fi
+    install_package "$package_name" || return 1
+    command -v dnsmasq >/dev/null 2>&1 || {
+        _red "dnsmasq was installed but the executable is unavailable"
+        return 1
+    }
+}
+
 install_dependencies() {
     $PACKAGETYPE_UPDATE || {
         _red "Package index update failed; cannot install Incus prerequisites"
@@ -498,6 +550,10 @@ install_dependencies() {
     done
     install_gpg || {
         _red "Required package installation failed: gpg"
+        return 1
+    }
+    install_dnsmasq || {
+        _red "Required package installation failed: dnsmasq"
         return 1
     }
 }
@@ -897,7 +953,7 @@ create_sparse_file() {
 create_lvm_restore_service() {
     local loop_file="$1"
     if command -v systemctl >/dev/null 2>&1; then
-        cat > /etc/systemd/system/incus-lvm-losetup.service <<EOF
+        if ! cat > /etc/systemd/system/incus-lvm-losetup.service <<EOF
 [Unit]
 Description=Setup loop device for Incus LVM storage pool
 Before=incus.service
@@ -906,15 +962,18 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'if [ -f "$loop_file" ]; then if ! vgs incus_vg >/dev/null 2>&1; then existing_loop=\$(losetup -j "$loop_file" | cut -d: -f1); if [ -z "\$existing_loop" ]; then loop_dev=\$(losetup -f); losetup "\$loop_dev" "$loop_file"; fi; vgchange -ay incus_vg 2>/dev/null || true; fi; fi'
+ExecStart=/bin/bash -c 'set -eu; if [ -f "$loop_file" ]; then if ! vgs incus_vg >/dev/null 2>&1; then existing_loop=\$(losetup -j "$loop_file" | cut -d: -f1); if [ -z "\$existing_loop" ]; then loop_dev=\$(losetup -f); [ -n "\$loop_dev" ]; losetup "\$loop_dev" "$loop_file"; fi; vgchange -ay incus_vg; fi; fi'
 ExecStop=/bin/bash -c 'vgchange -an incus_vg 2>/dev/null || true; losetup -d \$(losetup -j "$loop_file" | cut -d: -f1) 2>/dev/null || true'
 [Install]
 WantedBy=multi-user.target
 EOF
-        service_manager daemon-reload
-        service_manager enable incus-lvm-losetup.service
+        then
+            return 1
+        fi
+        service_manager daemon-reload || return 1
+        service_manager enable incus-lvm-losetup.service || return 1
     elif command -v rc-update >/dev/null 2>&1; then
-        cat > /etc/init.d/incus-lvm-losetup <<'EOF'
+        if ! cat > /etc/init.d/incus-lvm-losetup <<'EOF'
 #!/sbin/openrc-run
 description="Setup loop device for Incus LVM storage pool"
 depend() {
@@ -935,7 +994,11 @@ start() {
             loop_dev=$(losetup -f)
             losetup "$loop_dev" "$LOOP_FILE"
         fi
-        vgchange -ay incus_vg 2>/dev/null || true
+        if ! vgchange -ay incus_vg 2>/dev/null; then
+            eerror "Unable to activate Incus LVM volume group"
+            eend 1
+            return 1
+        fi
     fi
     eend 0
 }
@@ -947,11 +1010,14 @@ stop() {
     eend 0
 }
 EOF
-        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-lvm-losetup
-        chmod +x /etc/init.d/incus-lvm-losetup
-        service_manager enable incus-lvm-losetup
+        then
+            return 1
+        fi
+        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-lvm-losetup || return 1
+        chmod +x /etc/init.d/incus-lvm-losetup || return 1
+        service_manager enable incus-lvm-losetup || return 1
     else
-        cat > /usr/local/bin/incus-lvm-restore.sh <<EOF
+        if ! cat > /usr/local/bin/incus-lvm-restore.sh <<EOF
 #!/bin/bash
 LOOP_FILE="$loop_file"
 if [ ! -f "\$LOOP_FILE" ]; then
@@ -963,22 +1029,28 @@ if ! vgs incus_vg >/dev/null 2>&1; then
         loop_dev=\$(losetup -f)
         losetup "\$loop_dev" "\$LOOP_FILE"
     fi
-    vgchange -ay incus_vg 2>/dev/null || true
+    vgchange -ay incus_vg 2>/dev/null || exit 1
 fi
 exit 0
 EOF
-        chmod +x /usr/local/bin/incus-lvm-restore.sh
+        then
+            return 1
+        fi
+        chmod +x /usr/local/bin/incus-lvm-restore.sh || return 1
         if [ -f /etc/rc.local ]; then
             if ! grep -q "incus-lvm-restore.sh" /etc/rc.local; then
-                sed -i '/^exit 0/i /usr/local/bin/incus-lvm-restore.sh' /etc/rc.local
+                sed -i '/^exit 0/i /usr/local/bin/incus-lvm-restore.sh' /etc/rc.local || return 1
             fi
         else
-            cat > /etc/rc.local <<'EOF'
+            if ! cat > /etc/rc.local <<'EOF'
 #!/bin/sh -e
 /usr/local/bin/incus-lvm-restore.sh
 exit 0
 EOF
-            chmod +x /etc/rc.local
+            then
+                return 1
+            fi
+            chmod +x /etc/rc.local || return 1
         fi
     fi
 }
@@ -987,7 +1059,7 @@ create_zfs_restore_service() {
     local loop_file="$1"
     local zpool_name="$2"
     if command -v systemctl >/dev/null 2>&1; then
-        cat > /etc/systemd/system/incus-zfs-import.service <<EOF
+        if ! cat > /etc/systemd/system/incus-zfs-import.service <<EOF
 [Unit]
 Description=Import ZFS pool for Incus storage
 Before=incus.service
@@ -996,15 +1068,18 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'if [ -f "$loop_file" ]; then if ! zpool list "$zpool_name" >/dev/null 2>&1; then zpool import "$zpool_name" 2>/dev/null || zpool import -d \$(dirname "$loop_file") "$zpool_name" 2>/dev/null || true; fi; fi'
+ExecStart=/bin/bash -c 'set -eu; if [ -f "$loop_file" ]; then if ! zpool list "$zpool_name" >/dev/null 2>&1; then zpool import "$zpool_name" 2>/dev/null || zpool import -d \$(dirname "$loop_file") "$zpool_name" 2>/dev/null; fi; fi'
 ExecStop=/bin/bash -c 'zpool export "$zpool_name" 2>/dev/null || true'
 [Install]
 WantedBy=multi-user.target
 EOF
-        service_manager daemon-reload
-        service_manager enable incus-zfs-import.service
+        then
+            return 1
+        fi
+        service_manager daemon-reload || return 1
+        service_manager enable incus-zfs-import.service || return 1
     elif command -v rc-update >/dev/null 2>&1; then
-        cat > /etc/init.d/incus-zfs-import <<'EOF'
+        if ! cat > /etc/init.d/incus-zfs-import <<'EOF'
 #!/sbin/openrc-run
 description="Import ZFS pool for Incus storage"
 depend() {
@@ -1022,7 +1097,11 @@ start() {
         return 1
     fi
     if ! zpool list "$ZPOOL_NAME" >/dev/null 2>&1; then
-        zpool import "$ZPOOL_NAME" 2>/dev/null || zpool import -d $(dirname "$LOOP_FILE") "$ZPOOL_NAME" 2>/dev/null || true
+        if ! zpool import "$ZPOOL_NAME" 2>/dev/null && ! zpool import -d "$(dirname "$LOOP_FILE")" "$ZPOOL_NAME" 2>/dev/null; then
+            eerror "Unable to import Incus ZFS pool"
+            eend 1
+            return 1
+        fi
     fi
     eend 0
 }
@@ -1033,12 +1112,15 @@ stop() {
     eend 0
 }
 EOF
-        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-zfs-import
-        sed -i "s|ZPOOL_NAME_PLACEHOLDER|$zpool_name|g" /etc/init.d/incus-zfs-import
-        chmod +x /etc/init.d/incus-zfs-import
-        service_manager enable incus-zfs-import
+        then
+            return 1
+        fi
+        sed -i "s|LOOP_FILE_PLACEHOLDER|$loop_file|g" /etc/init.d/incus-zfs-import || return 1
+        sed -i "s|ZPOOL_NAME_PLACEHOLDER|$zpool_name|g" /etc/init.d/incus-zfs-import || return 1
+        chmod +x /etc/init.d/incus-zfs-import || return 1
+        service_manager enable incus-zfs-import || return 1
     else
-        cat > /usr/local/bin/incus-zfs-restore.sh <<EOF
+        if ! cat > /usr/local/bin/incus-zfs-restore.sh <<EOF
 #!/bin/bash
 LOOP_FILE="$loop_file"
 ZPOOL_NAME="$zpool_name"
@@ -1046,22 +1128,28 @@ if [ ! -f "\$LOOP_FILE" ]; then
     exit 1
 fi
 if ! zpool list "\$ZPOOL_NAME" >/dev/null 2>&1; then
-    zpool import "\$ZPOOL_NAME" 2>/dev/null || zpool import -d \$(dirname "\$LOOP_FILE") "\$ZPOOL_NAME" 2>/dev/null || true
+    zpool import "\$ZPOOL_NAME" 2>/dev/null || zpool import -d \$(dirname "\$LOOP_FILE") "\$ZPOOL_NAME" 2>/dev/null || exit 1
 fi
 exit 0
 EOF
-        chmod +x /usr/local/bin/incus-zfs-restore.sh
+        then
+            return 1
+        fi
+        chmod +x /usr/local/bin/incus-zfs-restore.sh || return 1
         if [ -f /etc/rc.local ]; then
             if ! grep -q "incus-zfs-restore.sh" /etc/rc.local; then
-                sed -i '/^exit 0/i /usr/local/bin/incus-zfs-restore.sh' /etc/rc.local
+                sed -i '/^exit 0/i /usr/local/bin/incus-zfs-restore.sh' /etc/rc.local || return 1
             fi
         else
-            cat > /etc/rc.local <<'EOF'
+            if ! cat > /etc/rc.local <<'EOF'
 #!/bin/sh -e
 /usr/local/bin/incus-zfs-restore.sh
 exit 0
 EOF
-            chmod +x /etc/rc.local
+            then
+                return 1
+            fi
+            chmod +x /etc/rc.local || return 1
         fi
     fi
 }
@@ -1194,6 +1282,59 @@ create_storage_pool_with_custom_path() {
     return $status
 }
 
+# Newly installed userspace tools do not imply a kernel reboot is required.
+# Preserve fallback/retry only when support is neither active nor loadable.
+ensure_storage_kernel_support() {
+    local backend="$1" module
+    case "$backend" in
+        btrfs|zfs)
+            grep -qw "$backend" /proc/filesystems && return 0
+            module="$backend"
+            ;;
+        lvm)
+            grep -qw device-mapper /proc/devices && return 0
+            module=dm_mod
+            ;;
+        *) return 0 ;;
+    esac
+    modprobe "$module" && return 0
+    _yellow "$backend kernel support is unavailable; retaining the retry marker and trying another backend"
+    _yellow "$backend 内核支持不可用，保留重试标记并尝试其他存储后端"
+    echo "$backend" >/usr/local/bin/incus_reboot || return 1
+    return 1
+}
+
+# Native Incus caches supported storage drivers when the daemon starts.
+# Installing the userspace tools afterwards is not sufficient for admin init.
+# Refresh only an empty daemon whose validated inventory lacks this driver;
+# never restart an existing storage environment as part of backend selection.
+ensure_storage_driver_ready() {
+    local backend="$1" response drivers pools attempt
+    for attempt in 0 1; do
+        response=$(incus query /1.0) || return 1
+        response=$(api_metadata <<<"$response") || return 1
+        drivers=$(jq -r '
+            .environment.storage_supported_drivers |
+            if type == "array" and all(.[]; type == "object" and (.Name | type) == "string" and (.Name | length) > 0)
+            then map(.Name) | join("\n") else error("invalid supported storage drivers") end
+        ' <<<"$response") || return 1
+        if grep -Fxq "$backend" <<<"$drivers"; then
+            return 0
+        fi
+        if [ "$attempt" -eq 1 ]; then
+            _yellow "$backend is still unavailable after refreshing the Incus daemon"
+            return 1
+        fi
+        pools=$(runtime_resource_names storage) || return 1
+        if [ -n "$pools" ]; then
+            _red "Existing storage pools prevent automatic Incus driver refresh"
+            return 1
+        fi
+        service_manager restart incus || return 1
+        incus admin waitready --timeout=120 || return 1
+    done
+}
+
 init_storage_backend() {
     local backend="$1"
     local existing_pool
@@ -1233,7 +1374,6 @@ init_storage_backend() {
     fi
     _green "尝试使用 $backend 类型，存储池大小为 $disk_nums"
     _green "Trying to use $backend type with storage pool size $disk_nums"
-    local need_reboot=false
     if [ "$backend" = "btrfs" ] && ! is_storage_installed "btrfs" && ! command -v btrfs >/dev/null; then
         _yellow "正在安装 btrfs-progs..."
         _yellow "Installing btrfs-progs..."
@@ -1242,11 +1382,6 @@ init_storage_backend() {
             return 1
         }
         record_installed_storage "btrfs"
-        modprobe btrfs || true
-        _green "无法加载btrfs模块。请重启本机再次执行本脚本以加载btrfs内核。"
-        _green "btrfs module could not be loaded. Please reboot the machine and execute this script again."
-        echo "$backend" >/usr/local/bin/incus_reboot
-        need_reboot=true
     elif [ "$backend" = "lvm" ] && ! is_storage_installed "lvm" && ! command -v lvm >/dev/null; then
         _yellow "正在安装 lvm2..."
         _yellow "Installing lvm2..."
@@ -1255,11 +1390,6 @@ init_storage_backend() {
             return 1
         }
         record_installed_storage "lvm"
-        modprobe dm-mod || true
-        _green "无法加载LVM模块。请重启本机再次执行本脚本以加载LVM内核。"
-        _green "LVM module could not be loaded. Please reboot the machine and execute this script again."
-        echo "$backend" >/usr/local/bin/incus_reboot
-        need_reboot=true
     elif [ "$backend" = "zfs" ] && ! is_storage_installed "zfs" && ! command -v zfs >/dev/null; then
         _yellow "正在安装 zfsutils-linux..."
         _yellow "Installing zfsutils-linux..."
@@ -1268,11 +1398,6 @@ init_storage_backend() {
             return 1
         }
         record_installed_storage "zfs"
-        modprobe zfs || true
-        _green "无法加载ZFS模块。请重启本机再次执行本脚本以加载ZFS内核。"
-        _green "ZFS module could not be loaded. Please reboot the machine and execute this script again."
-        echo "$backend" >/usr/local/bin/incus_reboot
-        need_reboot=true
     elif [ "$backend" = "ceph" ] && ! is_storage_installed "ceph" && ! command -v ceph >/dev/null; then
         _yellow "正在安装 ceph-common..."
         _yellow "Installing ceph-common..."
@@ -1282,19 +1407,8 @@ init_storage_backend() {
         }
         record_installed_storage "ceph"
     fi
-    if [ "$backend" = "btrfs" ] && is_storage_installed "btrfs" && ! grep -q btrfs /proc/filesystems; then
-        modprobe btrfs || true
-    elif [ "$backend" = "lvm" ] && is_storage_installed "lvm" && ! grep -q dm-mod /proc/modules; then
-        modprobe dm-mod || true
-    elif [ "$backend" = "zfs" ] && is_storage_installed "zfs" && ! grep -q zfs /proc/filesystems; then
-        modprobe zfs || true
-    fi
-    if [ "$need_reboot" = true ]; then
-        # A missing optional kernel module must not abort the whole installer.
-        # Leave the marker for a later retry and let setup_storage try the next
-        # backend (ultimately dir) so IPv4 container creation remains usable.
-        return 1
-    fi
+    ensure_storage_kernel_support "$backend" || return 1
+    ensure_storage_driver_ready "$backend" || return 1
     local temp
     if existing_pool=$(active_storage_pool); then
         _yellow "检测到现有 $existing_pool 存储池，将保留并复用它"
@@ -1514,7 +1628,7 @@ get_user_inputs() {
     else
         while true; do
             _green "Do you want to specify a custom path for the storage pool? (y/n) [n]:"
-            reading "是否需要指定存储池的自定义路径？(y/n) [n]：" use_custom_path
+            reading "是否需要指定存储池的自定义路径？(y/n) [n]：" use_custom_path || return 1
             use_custom_path=${use_custom_path:-n}
             if [[ "$use_custom_path" =~ ^[yYnN]$ ]]; then
                 break
@@ -1526,7 +1640,7 @@ get_user_inputs() {
         if [[ "$use_custom_path" =~ ^[yY]$ ]]; then
             while true; do
                 _green "Please enter the custom storage path (e.g., /data/incus-storage):"
-                reading "请输入自定义存储路径 (例如：/data/incus-storage)：" storage_path
+                reading "请输入自定义存储路径 (例如：/data/incus-storage)：" storage_path || return 1
                 if [[ -n "$storage_path" && "$storage_path" =~ ^/.+ ]]; then
                     if [ ! -d "$storage_path" ]; then
                         mkdir -p "$storage_path" 2>/dev/null
@@ -1566,7 +1680,7 @@ get_user_inputs() {
     else
         while true; do
             _green "How large a storage pool does the host need to open? (The storage pool is the size of the sum of the ct's hard disk, it is recommended that the storage pool reaches 95% of the space of the host's hard disk, note that it is in GB, enter 10 if you need 10G storage pool):"
-            reading "宿主机需要开设多大的存储池？(存储池就是容器硬盘之和的大小，推荐存储池达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums
+            reading "宿主机需要开设多大的存储池？(存储池就是容器硬盘之和的大小，推荐存储池达到宿主机硬盘的95%空间，注意是GB为单位，需要10G存储池则输入10)：" disk_nums || return 1
             if [[ "$disk_nums" =~ ^[1-9][0-9]*$ ]]; then
                 break
             else
@@ -1583,6 +1697,7 @@ download_preconfigured_files() {
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/ssh_sh.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/config.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/image_lookup.sh"
+        "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ownership.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildct.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/buildvm.sh"
         "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ops.sh"
@@ -1627,7 +1742,8 @@ ensure_runtime_network() {
     if ! grep -Fxq default <<< "$profiles"; then
         incus profile create default || return 1
     fi
-    profile=$(incus query /1.0/profiles/default | api_metadata) || return 1
+    profile=$(incus query /1.0/profiles/default) || return 1
+    profile=$(api_metadata profile <<<"$profile") || return 1
     roots=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "disk" and .value.path == "/")] | length' <<< "$profile") || return 1
     if [ "$roots" -eq 0 ]; then
         if jq -e '.devices.root != null' <<< "$profile" >/dev/null; then
@@ -1673,7 +1789,7 @@ ensure_runtime_network() {
         return 1
     fi
 
-    networks=$(incus network list --format csv -c n) || return 1
+    networks=$(runtime_resource_names network) || return 1
     if ! grep -Fxq "$bridge" <<< "$networks"; then
         if ip link show dev "$bridge" >/dev/null 2>&1; then
             _red "$bridge already exists outside Incus; refusing to replace it"
@@ -1683,7 +1799,8 @@ ensure_runtime_network() {
         incus network create "$bridge" ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none || return 1
         incus network set "$bridge" ipv6.address auto || _yellow "IPv6 unavailable; retaining IPv4 networking"
     fi
-    config=$(incus query "/1.0/networks/$bridge" | api_metadata) || return 1
+    config=$(incus query "/1.0/networks/$bridge") || return 1
+    config=$(api_metadata network <<<"$config") || return 1
     jq -e '.type == "bridge" and .managed == true' <<< "$config" >/dev/null || {
         _red "$bridge is not a managed bridge"; return 1;
     }
@@ -1723,11 +1840,20 @@ configure_incus_settings() {
     ensure_runtime_network || return 1
     # Set managed DNS only when the bridge has no explicit choice. Preserve
     # administrators' `none`, `dynamic`, or custom DNS configuration.
-    local network_config dns_mode
-    network_config=$(incus query "/1.0/networks/incusbr0" | api_metadata) || return 1
+    local network_config dns_mode raw_dnsmasq
+    network_config=$(incus query "/1.0/networks/incusbr0") || return 1
+    network_config=$(api_metadata network <<<"$network_config") || return 1
     dns_mode=$(jq -r '.config["dns.mode"] // empty' <<< "$network_config") || return 1
     if [ -z "$dns_mode" ]; then
         incus network set incusbr0 dns.mode managed || return 1
+    fi
+    # A managed bridge created by `incus admin init --auto` may still have an
+    # empty raw.dnsmasq and inherit the host's loopback resolver. That resolver
+    # is not reachable from containers, so provide upstreams only when the
+    # administrator has not configured custom DNS rules.
+    raw_dnsmasq=$(jq -r '.config["raw.dnsmasq"] // empty' <<< "$network_config") || return 1
+    if [ -z "$raw_dnsmasq" ]; then
+        incus network set incusbr0 raw.dnsmasq $'server=1.1.1.1\nserver=8.8.8.8' || return 1
     fi
     incus config set images.auto_update_interval 0 || return 1
     incus remote add opsmaru https://images.opsmaru.dev/spaces/43ad54472be82d7236eea3d1 --public --protocol simplestreams >/dev/null 2>&1 ||
@@ -1766,7 +1892,11 @@ optimize_system() {
     fi
     if [ -f "/etc/gai.conf" ]; then
         sed -i 's/.*precedence ::ffff:0:0\/96.*/precedence ::ffff:0:0\/96  100/g' /etc/gai.conf
-        service_manager restart networking 2>/dev/null || true
+        if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "networking.service"; then
+            service_manager restart networking 2>/dev/null || return 1
+        elif command -v rc-service >/dev/null 2>&1 && rc-service --list 2>/dev/null | grep -q "networking"; then
+            service_manager restart networking 2>/dev/null || return 1
+        fi
     fi
     return 0
 }
@@ -1776,15 +1906,23 @@ install_dns_checker() {
         _yellow "No systemd installation detected; skipping optional DNS checker"
         return 0
     fi
-    if [ ! -f /usr/local/bin/check-dns.sh ]; then
-        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.sh" -O /usr/local/bin/check-dns.sh || return 1
-        chmod +x /usr/local/bin/check-dns.sh || return 1
+    if [ ! -s /usr/local/bin/check-dns.sh ]; then
+        local checker_tmp
+        checker_tmp=$(mktemp /usr/local/bin/check-dns.sh.tmp.XXXXXX) || return 1
+        if ! wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.sh" -O "$checker_tmp" || [ ! -s "$checker_tmp" ] || ! chmod +x "$checker_tmp" || ! mv -f -- "$checker_tmp" /usr/local/bin/check-dns.sh; then
+            rm -f -- "$checker_tmp"
+            return 1
+        fi
     else
         echo "Script already exists. Skipping installation."
     fi
-    if [ ! -f /etc/systemd/system/check-dns.service ]; then
-        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.service" -O /etc/systemd/system/check-dns.service || return 1
-        chmod +x /etc/systemd/system/check-dns.service || return 1
+    if [ ! -s /etc/systemd/system/check-dns.service ]; then
+        local service_tmp
+        service_tmp=$(mktemp /etc/systemd/system/check-dns.service.tmp.XXXXXX) || return 1
+        if ! wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/check-dns.service" -O "$service_tmp" || [ ! -s "$service_tmp" ] || ! chmod +x "$service_tmp" || ! mv -f -- "$service_tmp" /etc/systemd/system/check-dns.service; then
+            rm -f -- "$service_tmp"
+            return 1
+        fi
         service_manager daemon-reload || return 1
         service_manager enable check-dns.service || return 1
         service_manager start check-dns.service || return 1
@@ -1799,20 +1937,77 @@ ensure_nftables() {
     fi
     $PACKAGETYPE_INSTALL nftables >/dev/null 2>&1 || true
     if command -v nft >/dev/null 2>&1; then
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl enable nftables 2>/dev/null || true
-            systemctl start nftables 2>/dev/null || true
-        fi
+        # Boot persistence is enabled only after our snapshot and include have
+        # been saved. Enabling it here could arm an unrelated old ruleset even
+        # when the rest of initialization fails.
         return 0
     fi
     return 1
 }
 
-ensure_iptables_persistent() {
-    if command -v apt >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || return 1
+save_iptables_persistence() {
+    local target="${1:?iptables persistence target is required}" save_command="${2:?iptables save command is required}"
+    local resolved directory temporary
+    if [ -L "$target" ]; then
+        resolved=$(readlink -f -- "$target") || return 1
+        [ -e "$resolved" ] || return 1
+    else
+        resolved="$target"
     fi
-    return 0
+    directory=$(dirname -- "$resolved") || return 1
+    mkdir -p -- "$directory" || return 1
+    [ ! -e "$resolved" ] || [ -f "$resolved" ] || return 1
+    temporary=$(mktemp "$directory/.oneclickvirt-iptables.XXXXXX") || return 1
+    # Preserve mode/owner of existing policies; a new snapshot starts at 600.
+    if { [ -f "$resolved" ] && ! cp -p -- "$resolved" "$temporary"; } ||
+        ! "$save_command" >"$temporary" || ! mv -f -- "$temporary" "$resolved"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+nftables_persistence_file() {
+    case "${SYSTEM:-}" in
+        CentOS|Fedora) printf '%s\n' /etc/sysconfig/nftables.conf ;;
+        Alpine) printf '%s\n' /etc/nftables.nft ;;
+        Debian|Ubuntu|Arch) printf '%s\n' /etc/nftables.conf ;;
+        *) printf '%s\n' 'No supported nftables boot persistence for this system' >&2; return 1 ;;
+    esac
+}
+
+enable_nftables_persistence() {
+    # Enabling is intentionally separate from package discovery and is called
+    # only after the complete snapshot/include exists. Do not start or reload.
+    if [ "${SYSTEM:-}" = Alpine ]; then
+        install_package nftables-openrc || return 1
+    fi
+    service_manager enable nftables || return 1
+}
+
+iptables_persistence_file() {
+    case "${SYSTEM:-}" in
+        Debian|Ubuntu) printf '%s\n' /etc/iptables/rules.v4 ;;
+        CentOS|Fedora) printf '%s\n' /etc/sysconfig/iptables ;;
+        Arch) printf '%s\n' /etc/iptables/iptables.rules ;;
+        Alpine) printf '%s\n' /etc/iptables/rules-save ;;
+        *) printf '%s\n' 'No supported iptables boot persistence for this system' >&2; return 1 ;;
+    esac
+}
+
+ensure_iptables_persistent() {
+    local persistence_service=iptables
+    case "${SYSTEM:-}" in
+        Debian|Ubuntu)
+            DEBIAN_FRONTEND=noninteractive install_package iptables-persistent || return 1
+            persistence_service=netfilter-persistent
+            ;;
+        CentOS|Fedora) install_package iptables-services || return 1 ;;
+        Alpine) install_package iptables-openrc || return 1 ;;
+        Arch) : ;;
+        *) return 1 ;;
+    esac
+    # Enable boot restoration without starting/reloading another live policy.
+    service_manager enable "$persistence_service" || return 1
 }
 
 save_firewall_rules() {
@@ -1821,7 +2016,8 @@ save_firewall_rules() {
         # Saving 'nft list ruleset' would include incusd's transient tables which
         # reference interfaces (incusbr0) that don't exist at nftables.service
         # start time, causing firewall/SSH breakage on reboot.
-        local nft_file=/etc/nftables.d/oneclickvirt-incus.nft
+        local nft_file=/etc/nftables.d/oneclickvirt-incus.nft config_file
+        config_file=$(nftables_persistence_file) || return 1
         local tables rules block_rules="" temporary
         tables=$(nft list tables) || return 1
         rules=$(nft list table inet incus_masq) || return 1
@@ -1841,21 +2037,18 @@ save_firewall_rules() {
             return 1
         fi
         # Keep host rules and other runtimes' includes in the main config.
-        if ! grep -Eq '^[[:space:]]*include[[:space:]]+"/etc/nftables.d/(oneclickvirt-incus|\*)\.nft"' /etc/nftables.conf 2>/dev/null; then
-            printf '\n%s\n' 'include "/etc/nftables.d/oneclickvirt-incus.nft"' >>/etc/nftables.conf || return 1
+        mkdir -p -- "$(dirname -- "$config_file")" || return 1
+        if ! grep -Eq '^[[:space:]]*include[[:space:]]+"/etc/nftables.d/(oneclickvirt-incus|\*)\.nft"' "$config_file" 2>/dev/null; then
+            printf '\n%s\n' 'include "/etc/nftables.d/oneclickvirt-incus.nft"' >>"$config_file" || return 1
         fi
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl enable nftables 2>/dev/null || true
-        fi
+        enable_nftables_persistence || return 1
     else
-        if command -v netfilter-persistent >/dev/null 2>&1; then
-            netfilter-persistent save 2>/dev/null || true
-        fi
-        if command -v iptables-save >/dev/null 2>&1; then
-            mkdir -p /etc/iptables
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-        fi
+        # This branch only changes IPv4 NAT. A global save would also replace
+        # IPv6 policy and bypass our atomic snapshot/error handling.
+        command -v iptables-save >/dev/null 2>&1 || return 1
+        local policy_file
+        policy_file=$(iptables_persistence_file) || return 1
+        save_iptables_persistence "$policy_file" iptables-save || return 1
     fi
 }
 
@@ -1876,28 +2069,260 @@ add_nft_rule_once() {
     nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || return 1
 }
 
+ocv_lock_firewall() {
+    local lock_dir=/run/oneclickvirt-firewall-locks lock_file
+    command -v flock >/dev/null 2>&1 || return 1
+    [ ! -L "$lock_dir" ] || return 1
+    mkdir -p -m 700 -- "$lock_dir" || return 1
+    [ "$(stat -c %u "$lock_dir")" = "$EUID" ] || return 1
+    [ "$(stat -c %a "$lock_dir")" = 700 ] || return 1
+    lock_file="$lock_dir/firewall.lock"
+    [ ! -L "$lock_file" ] || return 1
+    exec {ocv_firewall_lock_fd}>>"$lock_file" || return 1
+    # Keep the inode: unlinking it would let another process bypass this lock.
+    flock -xw 120 "$ocv_firewall_lock_fd" || return 1
+}
+
+ocv_with_firewall_lock() {
+    # The subshell releases the lock on both success and failure.
+    ( ocv_lock_firewall && "$@" )
+}
+
+sync_incus_firewalld_masquerade() {
+    local subnet="${1:-}" prefix octet active=false state_status=127
+    local permanent_rules="" runtime_rules="" scope rules rule source present
+    local cli=firewall-cmd
+    local octets=() options=() scopes=(permanent)
+    local pattern="^0 -s ([0-9./]+) ['\"]?!['\"]? -o incusbr0 -m comment --comment ['\"]?oneclickvirt-incus-ipv4['\"]? -j MASQUERADE$"
+    # Validate before changing either scope, preserving working rules on bad
+    # runtime metadata. An empty subnet means remove only this installer's NAT.
+    if [ -n "$subnet" ]; then
+        [[ "$subnet" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+        prefix="${subnet##*/}"
+        ((10#$prefix >= 1 && 10#$prefix <= 32)) || return 1
+        IFS=. read -r -a octets <<<"${subnet%/*}"
+        for octet in "${octets[@]}"; do ((10#$octet <= 255)) || return 1; done
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        state_status=0
+        firewall-cmd --state >/dev/null 2>&1 || state_status=$?
+        # Only NOT_RUNNING permits offline mutation. A D-Bus failure is not
+        # evidence that the daemon stopped; do not overwrite its configuration.
+        if [ "$state_status" -ne 0 ] && [ "$state_status" -ne 252 ]; then
+            # No saved direct configuration means there is nothing for a
+            # stopped/unavailable daemon to restore; kernel cleanup follows.
+            [ -z "$subnet" ] && [ ! -e /etc/firewalld/direct.xml ] && return 0
+            return 1
+        fi
+    fi
+    if [ "$state_status" -eq 0 ]; then
+        active=true
+        permanent_rules=$(firewall-cmd --permanent --direct --get-rules ipv4 nat POSTROUTING) || return 1
+        runtime_rules=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING) || return 1
+        scopes+=(runtime)
+    else
+        [ -z "$subnet" ] || return 1
+        # Retire saved rules through the offline API when the daemon is down,
+        # so its next start cannot restore stale NAT. Never edit firewalld XML.
+        [ -f /etc/firewalld/direct.xml ] || return 0
+        local saved_status=0
+        grep -Fq 'oneclickvirt-incus-ipv4' /etc/firewalld/direct.xml || saved_status=$?
+        [ "$saved_status" -ne 1 ] || return 0
+        [ "$saved_status" -eq 0 ] || return 1
+        [ "$state_status" -eq 252 ] || return 1
+        command -v firewall-offline-cmd >/dev/null 2>&1 || return 1
+        cli=firewall-offline-cmd
+        permanent_rules=$("$cli" --direct --get-rules ipv4 nat POSTROUTING) || return 1
+    fi
+    for scope in "${scopes[@]}"; do
+        options=()
+        rules="$permanent_rules"
+        if [ "$scope" = runtime ]; then
+            rules="$runtime_rules"
+        elif [ "$active" = true ]; then
+            options=(--permanent)
+        fi
+        present=false
+        while IFS= read -r rule; do
+            if [[ "$rule" =~ $pattern ]] && [ "${BASH_REMATCH[1]}" = "$subnet" ]; then present=true; fi
+        done <<<"$rules"
+        if [ -n "$subnet" ] && [ "$present" = false ]; then
+            "$cli" "${options[@]}" --direct --add-rule ipv4 nat POSTROUTING 0 \
+                -s "$subnet" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+        fi
+        # Add the replacement before retiring the old subnet. Rebuild
+        # arguments from a strict match; never evaluate firewall output.
+        while IFS= read -r rule; do
+            if [[ "$rule" =~ $pattern ]]; then
+                source="${BASH_REMATCH[1]}"
+                if [ -z "$subnet" ] || [ "$source" != "$subnet" ]; then
+                    "$cli" "${options[@]}" --direct --remove-rule ipv4 nat POSTROUTING 0 \
+                        -s "$source" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+                fi
+            fi
+        done <<<"$rules"
+    done
+}
+
+configure_firewalld_masquerade() {
+    local nat_enabled subnet="" zone status scope
+    local options=()
+    nat_enabled=$(incus network get incusbr0 ipv4.nat) || return 1
+    if [ "$nat_enabled" = true ]; then
+        subnet=$(incus network get incusbr0 ipv4.address) || return 1
+    fi
+    firewall-cmd --state >/dev/null 2>&1 || return 1
+    sync_incus_firewalld_masquerade "$subnet" || return 1
+    for scope in permanent runtime; do
+        options=()
+        [ "$scope" != permanent ] || options=(--permanent)
+        status=0
+        zone=$(LC_ALL=C firewall-cmd "${options[@]}" --get-zone-of-interface=incusbr0 2>&1) || status=$?
+        if [ "$status" -eq 2 ] && [ "$zone" = 'no zone' ]; then
+            firewall-cmd "${options[@]}" --zone=trusted --add-interface=incusbr0 || return 1
+        elif [ "$status" -ne 0 ]; then
+            return 1
+        fi
+        # Keep an existing runtime or administrator zone assignment.
+    done
+}
+
+remove_incus_iptables_masquerade() {
+    local rules rule source backend="${1:-iptables}"
+    local pattern='^-A POSTROUTING -s ([0-9./]+) ! -o incusbr0 -m comment --comment "?oneclickvirt-incus-ipv4"? -j MASQUERADE$'
+    rules=$("$backend" -w -t nat -S POSTROUTING) || return 1
+    while IFS= read -r rule; do
+        if [[ "$rule" =~ $pattern ]]; then
+            source="${BASH_REMATCH[1]}"
+            "$backend" -w -t nat -D POSTROUTING -s "$source" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+        fi
+    done <<<"$rules"
+}
+
+remove_incus_iptables_persistence() {
+    local config_file="${1:-/etc/iptables/rules.v4}" temporary
+    [ -f "$config_file" ] || return 0
+    if [ -L "$config_file" ]; then
+        config_file=$(readlink -f -- "$config_file") || return 1
+    fi
+    temporary=$(mktemp "${config_file}.XXXXXX") || return 1
+    # Preserve the saved policy; runtime snapshots may differ from it.
+    if ! cp -p -- "$config_file" "$temporary" || ! awk '
+        /^-A POSTROUTING -s [0-9.]+\/[0-9]+ ! -o incusbr0 -m comment --comment "?oneclickvirt-incus-ipv4"? -j MASQUERADE$/ { next }
+        { print }
+    ' "$config_file" >"$temporary" || ! mv -f -- "$temporary" "$config_file"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+retire_incus_iptables_masquerade() {
+    local backend config_file version
+    for backend in iptables-nft iptables-legacy iptables; do
+        command -v "$backend" >/dev/null 2>&1 || continue
+        version=$("$backend" --version) || return 1
+        # An unloaded legacy NAT table contains no rules to retire. Avoid
+        # requiring the legacy kernel modules on a host that only uses nft.
+        if [[ "$version" == *legacy* ]]; then
+            [ -e /proc/net/ip_tables_names ] || continue
+            [ -r /proc/net/ip_tables_names ] || return 1
+            grep -Fxq nat /proc/net/ip_tables_names || continue
+        fi
+        remove_incus_iptables_masquerade "$backend" || return 1
+    done
+    if [ "$#" -eq 0 ]; then
+        set -- /etc/iptables/rules.v4 /etc/sysconfig/iptables /etc/iptables/iptables.rules /etc/iptables/rules-save
+    fi
+    for config_file in "$@"; do
+        remove_incus_iptables_persistence "$config_file" || return 1
+    done
+}
+
 add_iptables_masq_once() {
-    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null ||
-        iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || return 1
+    local nat_enabled subnet prefix octet
+    local subnet_octets=()
+    nat_enabled=$(incus network get incusbr0 ipv4.nat) || return 1
+    if [ "$nat_enabled" != true ]; then
+        remove_incus_iptables_masquerade
+        return $?
+    fi
+    subnet=$(incus network get incusbr0 ipv4.address) || return 1
+    [[ "$subnet" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+    prefix="${subnet##*/}"
+    ((10#$prefix >= 1 && 10#$prefix <= 32)) || return 1
+    IFS=. read -r -a subnet_octets <<<"${subnet%/*}"
+    for octet in "${subnet_octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+    remove_incus_iptables_masquerade || return 1
+    iptables -w -t nat -C POSTROUTING -s "$subnet" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE 2>/dev/null ||
+        iptables -w -t nat -A POSTROUTING -s "$subnet" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+}
+
+configure_nft_masquerade() {
+    local nat_enabled rule=""
+    nat_enabled=$(incus network get incusbr0 ipv4.nat) || return 1
+    if [ "$nat_enabled" = true ]; then
+        rule='add rule inet incus_masq postrouting meta nfproto ipv4 iifname "incusbr0" oifname != "incusbr0" masquerade'
+    fi
+    # Only our IPv4 bridge traffic needs this fallback. A blanket inet rule
+    # also rewrites routed public IPv6 and traffic belonging to other runtimes.
+    # Replace the installer-owned chain in one transaction, including legacy
+    # broad rules; leave incusd's own per-network NAT configuration untouched.
+    nft -f - <<NFT || return 1
+add table inet incus_masq
+add chain inet incus_masq postrouting { type nat hook postrouting priority srcnat; policy accept; }
+flush chain inet incus_masq postrouting
+$rule
+NFT
+    sync_incus_firewalld_masquerade || return 1
+    retire_incus_iptables_masquerade "$@"
+}
+
+# Incus proxy devices that listen on the host address traverse the Linux
+# bridge netfilter path. Without br_netfilter, Incus accepts the device but
+# traffic to the published port cannot reach the container (and only a
+# warning is emitted by incusd). Load it before creating mappings and persist
+# the module/sysctls for the next boot.
+ensure_bridge_netfilter() {
+    local module_file=/etc/modules-load.d/oneclickvirt-bridge-netfilter.conf
+    if [ ! -d /proc/sys/net/bridge ]; then
+        command -v modprobe >/dev/null 2>&1 || return 1
+        modprobe br_netfilter || return 1
+    fi
+    [ -d /proc/sys/net/bridge ] || return 1
+    command -v sysctl >/dev/null 2>&1 || return 1
+    sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null || return 1
+    sysctl -w net.bridge.bridge-nf-call-ip6tables=1 >/dev/null || return 1
+    mkdir -p /etc/modules-load.d /etc/sysctl.d || return 1
+    if [ ! -f "$module_file" ] || ! grep -Fxq br_netfilter "$module_file"; then
+        printf '%s\n' br_netfilter >"$module_file" || return 1
+    fi
+    local sysctl_file=/etc/sysctl.d/99-oneclickvirt-bridge.conf
+    if [ ! -f "$sysctl_file" ] || ! grep -Eq '^net\.bridge\.bridge-nf-call-iptables=1$' "$sysctl_file"; then
+        printf '%s\n' 'net.bridge.bridge-nf-call-iptables=1' >>"$sysctl_file" || return 1
+    fi
+    if ! grep -Eq '^net\.bridge\.bridge-nf-call-ip6tables=1$' "$sysctl_file"; then
+        printf '%s\n' 'net.bridge.bridge-nf-call-ip6tables=1' >>"$sysctl_file" || return 1
+    fi
 }
 
 setup_iptables() {
+    ensure_bridge_netfilter || {
+        _red "br_netfilter is required for Incus host-address proxy port mappings"
+        return 1
+    }
     if command -v ufw >/dev/null 2>&1; then
         ufw allow in on incusbr0
         ufw route allow in on incusbr0
         ufw route allow out on incusbr0
     fi
     if ensure_nftables; then
-        # Use nftables for MASQUERADE (handles both IPv4 and IPv6)
-        nft add table inet incus_masq 2>/dev/null || nft list table inet incus_masq >/dev/null 2>&1 || return 1
-        nft add chain inet incus_masq postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null ||
-            nft list chain inet incus_masq postrouting >/dev/null 2>&1 || return 1
-        add_nft_rule_once inet incus_masq postrouting 'oifname != "incusbr0" masquerade' oifname != "incusbr0" masquerade || return 1
+        configure_nft_masquerade || return 1
         save_firewall_rules || return 1
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --permanent --zone=public --add-masquerade || return 1
-        firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent || return 1
-        firewall-cmd --reload || return 1
+        install_package iptables || return 1
+        configure_firewalld_masquerade || return 1
     else
         # Fallback to iptables with persistence
         install_package iptables || return 1
@@ -1932,7 +2357,7 @@ configure_uid_gid() {
 
 copy_scripts_to_system() {
     local script
-    for script in ssh_sh.sh ssh_bash.sh config.sh image_lookup.sh buildct.sh buildvm.sh instance_ops.sh macvlan.sh; do
+    for script in ssh_sh.sh ssh_bash.sh config.sh image_lookup.sh instance_ownership.sh buildct.sh buildvm.sh instance_ops.sh macvlan.sh; do
         if [ -f "/root/$script" ]; then
             cp "/root/$script" /usr/local/bin/ || return 1
             chmod 755 "/usr/local/bin/$script" || return 1
@@ -1945,18 +2370,19 @@ main() {
     load_storage_state
     statistics_of_run_times
     install_dependencies || return 1
+    if ! command -v flock >/dev/null 2>&1; then install_package util-linux || return 1; fi
     rebuild_cloud_init
     check_cdn_file
     install_incus || return 1
     incus admin waitready --timeout=120 || return 1
     setup_firewall || return 1
-    get_user_inputs
+    get_user_inputs || return 1
     setup_storage || return 1
-    service_manager start incus 2>/dev/null || true
+    service_manager start incus 2>/dev/null || return 1
     sleep 3
     configure_incus_settings || return 1
     optimize_system || return 1
-    setup_iptables || return 1
+    ocv_with_firewall_lock setup_iptables || return 1
     configure_uid_gid || return 1
     download_preconfigured_files || return 1
     copy_scripts_to_system || return 1

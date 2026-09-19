@@ -99,13 +99,43 @@ assert_eq '2a14:7c0:1002:10f8::1' "$IPV6" 'delegated /38 wins over host /128'
 assert_eq vmbr2 "$(ipv6_uplink_interface "$IPV6")" 'delegated bridge wins over host /128'
 unset -f ip
 
+# A public address without a default route may recover through a real router
+# neighbor, but the route must be retained only after the external probe works.
+route_state="$TMP_DIR/route-state"
+ip() {
+    case "$*" in
+    "-6 route show default") ;;
+    "route show default") printf '%s\n' 'default via 2606:4700::1 dev eth0' ;;
+    "-6 neigh show dev eth0") printf '%s\n' '2606:4700::1 dev eth0 lladdr 00:11:22:33:44:55 router REACHABLE' ;;
+    "-6 route replace default via 2606:4700::1 dev eth0 metric 4096") printf '%s\n' ok >"$route_state" ;;
+    "-6 route show default dev eth0") [ -f "$route_state" ] && printf '%s\n' 'default via 2606:4700::1 dev eth0 metric 4096' ;;
+    "-6 route del default via 2606:4700::1 dev eth0 metric 4096"|"-6 route del default dev eth0 metric 4096") rm -f "$route_state" ;;
+    *) command ip "$@" ;;
+    esac
+}
+curl() { return 0; }
+ensure_ipv6_default_route || fail "IPv6 default route was not recovered from a verified router neighbor"
+[ -f "$route_state" ] || fail "verified IPv6 route was not retained"
+rm -f "$route_state"
+curl() { return 1; }
+if ensure_ipv6_default_route; then
+    fail "IPv6 route probe failure was accepted"
+fi
+[ ! -e "$route_state" ] || fail "unverified IPv6 route was not rolled back"
+unset -f ip curl
+
 # shellcheck disable=SC2016 # The literal is the source-code contract under test.
 if ! grep -Fq 'net.ipv6.conf.${ipv6_network_name}.accept_ra=2' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
     fail "IPv6 forwarding must preserve router advertisements on the Incus uplink"
 fi
 # shellcheck disable=SC2016 # The literal is the source-code contract under test.
-if grep -Fq 'net.ipv6.conf.all.proxy_ndp=1' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
-    fail "Incus must not enable NDP proxying globally"
+if ! grep -Fq 'net.ipv6.conf.all.proxy_ndp=1' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
+    fail "Incus routed NICs require global NDP proxying"
+fi
+if ! grep -Fq -- '-6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb' "$ROOT_DIR/scripts/build_ipv6_network.sh" ||
+   ! grep -Fq -- '-6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb' "$ROOT_DIR/scripts/buildct.sh" ||
+   ! grep -Fq -- '-6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb' "$ROOT_DIR/scripts/buildvm.sh"; then
+    fail "IPv6 keepalive jobs must force IPv6 and fail closed on probe errors"
 fi
 
 # Reproduce the reported shape: cached terminal text, ANSI bytes, and the
@@ -169,6 +199,24 @@ assert_eq routed "$(cat "$TMP_DIR/state/incus_ipv6_mode")" "fallback preserves e
 rm -f "$TMP_DIR/state/incus_ipv6_mode"
 configure_ipv6_nat66_fallback >/dev/null
 assert_eq nat66 "$(cat "$TMP_DIR/state/incus_ipv6_mode")" "fallback records NAT66 mode"
+
+# A real Incus command failure must not be recorded as a successful NAT66
+# fallback.  This is intentionally separate from the no-command unit fixture
+# above, which only tests state bookkeeping.
+incus() {
+    case "$1 $2 $3 $4 $5" in
+        "config device get"*) return 1 ;;
+        "network get"*) return 1 ;;
+        "network set"*) return 1 ;;
+        *) return 1 ;;
+    esac
+}
+CONTAINER_NAME=incus-fallback-failure
+if configure_ipv6_nat66_fallback >/dev/null 2>&1; then
+    fail "Incus NAT66 command failure was hidden"
+fi
+unset CONTAINER_NAME
+unset -f incus
 
 # Explicit tunnel selection must win over a physical-interface fallback.
 # shellcheck disable=SC2329 # Called indirectly by the sourced network helpers.
@@ -333,5 +381,39 @@ restore_address 'fd42::1' eth0 64
 restore_address '2606:4700::1' eth0 128
 grep -Fq -- '-6 addr replace 2606:4700::1/128 dev eth0' "$restore_calls" || fail "global /128 mapping was not restored"
 unset -f ip
+
+# Readiness is idempotent: an already running instance must not be treated as
+# a failed `incus start`, while a stopped instance is started and rechecked.
+start_calls="$TMP_DIR/start-calls"
+stopped_started=false
+incus() {
+    case "$1 $2" in
+        "info running") printf '%s\n' 'Status: RUNNING' ;;
+        "info stopped")
+            if [ "$stopped_started" = true ]; then printf '%s\n' 'Status: RUNNING'; else printf '%s\n' 'Status: STOPPED'; fi
+            ;;
+        "start stopped") stopped_started=true; printf '%s\n' "$*" >>"$start_calls" ;;
+        *) return 1 ;;
+    esac
+}
+wait_for_container_running running || fail "already running container was rejected"
+if [ -s "$start_calls" ]; then
+    fail "already running container was started again"
+fi
+wait_for_container_running stopped || fail "stopped container was not started"
+grep -Fxq 'start stopped' "$start_calls" || fail "stopped container start was not recorded"
+unset -f incus
+
+container_state=RUNNING
+incus() {
+    case "$1 $2" in
+        "info stoptest") printf 'Status: %s\n' "$container_state" ;;
+        "stop stoptest") container_state=STOPPED ;;
+        *) return 1 ;;
+    esac
+}
+wait_for_container_stopped stoptest || fail "running container was not stopped"
+[ "$container_state" = STOPPED ] || fail "stop readiness returned before STOPPED"
+unset -f incus
 
 echo "build_ipv6_network tests passed"

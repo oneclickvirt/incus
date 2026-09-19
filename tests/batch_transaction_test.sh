@@ -20,7 +20,7 @@ write_fake_builder() {
         'count=$(cat "$MOCK_COUNT_FILE" 2>/dev/null || printf 0)' \
         'count=$((count + 1))' \
         'printf "%s\n" "$count" >"$MOCK_COUNT_FILE"' \
-        ': >"$MOCK_STATE_DIR/${name}.exists"' \
+        'printf "%s\n" "$_OCV_CREATE_TOKEN" >"$MOCK_STATE_DIR/${name}.exists"' \
         'if [ "$count" -eq "${MOCK_FAIL_ON:-0}" ]; then exit 42; fi' \
         'printf "%s\n" "$name $5 test-password $6 $7" >"$name"' \
         >"$destination"
@@ -66,6 +66,12 @@ run_add_case() (
     incus() {
         case "${1:-}" in
         info) [ -e "$MOCK_STATE_DIR/${2}.exists" ] ;;
+        query)
+            local object="${2##*/}"
+            [ -f "$MOCK_STATE_DIR/$object.exists" ] || return 1
+            jq -n --arg owner "$(cat "$MOCK_STATE_DIR/$object.exists")" --arg uuid "$object-uuid" \
+                '{config: {"user.oneclickvirt.creation-token": $owner, "volatile.uuid": $uuid}}'
+            ;;
         delete) rm -f -- "$MOCK_STATE_DIR/${3}.exists" ;;
         *) return 0 ;;
         esac
@@ -118,13 +124,21 @@ run_transaction_failure() (
         case "${1:-}" in
         delete) rm -f -- "$case_dir/state/${3}.exists" ;;
         info) [ -e "$case_dir/state/${2}.exists" ] ;;
+        query)
+            local object="${2##*/}"
+            [ -f "$case_dir/state/$object.exists" ] || return 1
+            jq -n --arg owner fixture-token --arg uuid "$object-uuid" \
+                '{config: {"user.oneclickvirt.creation-token": $owner, "volatile.uuid": $uuid}}'
+            ;;
         *) return 0 ;;
         esac
     }
     begin_batch
     : >"state/base.exists"
     : >"state/child.exists"
+    ocv_created_identity=$'fixture-token\tbase-uuid'
     track_batch_instance base
+    ocv_created_identity=$'fixture-token\tchild-uuid'
     track_batch_instance child
     printf '%s\n' 'new-log-entry' >"$batch_pending_log"
     exit 73
@@ -157,6 +171,10 @@ run_main_configuration_failure() (
         case "${1:-}" in
         storage) return 0 ;;
         info) [ -e "$case_dir/state/${2}.exists" ] ;;
+        query)
+            [ -e "$case_dir/state/base.exists" ] || return 1
+            printf '%s\n' '{"config":{"user.oneclickvirt.creation-token":"fixture-token","volatile.uuid":"base-uuid"}}'
+            ;;
         delete) rm -f -- "$case_dir/state/${3}.exists" ;;
         *) return 0 ;;
         esac
@@ -165,7 +183,10 @@ run_main_configuration_failure() (
     check_china() { :; }
     check_cdn_file() { :; }
     detect_arch() { sys_bit=x86_64; }
-    create_base_container() { : >"$case_dir/state/base.exists"; }
+    create_base_container() {
+        : >"$case_dir/state/base.exists"
+        ocv_created_identity=$'fixture-token\tbase-uuid'
+    }
     configure_storage() { :; }
     setup_storage() { :; }
     configure_network() { return 66; }

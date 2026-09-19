@@ -12,6 +12,10 @@ load_function() {
 }
 load_function configure_uid_gid
 load_function save_firewall_rules
+load_function nftables_persistence_file
+load_function enable_nftables_persistence
+SYSTEM=Debian
+service_manager() { [[ "$*" == 'enable nftables' ]]; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 _red() { :; }
 

@@ -7,7 +7,7 @@ panel_init="$repo_root/panel_scripts/panel_init.sh"
 load_function() {
     source <(awk -v name="$1" '$0 == name "() {" { printing=1 } printing { print } printing && /^}$/ { exit }' "$panel_init")
 }
-for name in ensure_runtime_storage select_storage_pool_for_profile ensure_default_bridge ensure_default_profile_devices configure_default_network_settings verify_runtime_network; do
+for name in api_metadata runtime_resource_names ensure_runtime_storage select_storage_pool_for_profile ensure_default_bridge ensure_default_profile_devices configure_default_network_settings verify_runtime_network; do
     load_function "$name"
 done
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -32,8 +32,9 @@ incus() {
             $mock_init_fails && return 1
             $mock_create_pool || : >"$mock_dir/initialized"
             return 0 ;;
-        'storage list --format csv -c n')
-            if [[ -f "$mock_dir/initialized" ]]; then printf '%s\n' local; else printf '%s\n' "$mock_pools"; fi ;;
+        'storage list --format json')
+            { if [[ -f "$mock_dir/initialized" ]]; then printf '%s\n' local; else printf '%s\n' "$mock_pools"; fi; } |
+                jq -Rsc '[split("\n")[] | select(length > 0) | {name: .}]' ;;
         'storage create default dir') mock_pools=default ;;
         'storage show '*) grep -Fxq "$3" <<<"$mock_pools" ;;
         'profile list --format csv -c n')
@@ -49,7 +50,7 @@ incus() {
             mock_profile=$(jq --arg pool "${8#pool=}" '.devices.root={type:"disk",path:"/",pool:$pool}' <<<"$mock_profile") ;;
         'profile device add default eth0 nic network=incusbr0 name=eth0')
             mock_profile=$(jq '.devices.eth0={type:"nic",network:"incusbr0",name:"eth0"}' <<<"$mock_profile") ;;
-        'network list --format csv -c n') if $mock_bridge_exists; then printf '%s\n' incusbr0; fi ;;
+        'network list --format json') if $mock_bridge_exists; then printf '[{"name":"incusbr0"}]\n'; else printf '[]\n'; fi ;;
         'network create incusbr0 ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none')
             $mock_bridge_fails && return 1
             mock_bridge_exists=true ;;
@@ -156,9 +157,60 @@ rm -f -- "$mock_dir/initialized"
     [[ "$mock_pools" == default ]] || fail 'dir fallback did not create the default pool'
 )
 (
-    mock_network=$(jq '.config["ipv4.nat"]="false"' <<<"$mock_network")
+    mock_network=$(jq '.config["ipv4.nat"]="false" | .config["raw.dnsmasq"]="server=10.0.0.53"' <<<"$mock_network")
     : >"$mock_dir/calls"
     configure_default_network_settings && verify_runtime_network || fail 'external routing/NAT configuration must remain supported'
     [[ "$(mutation_count)" == 0 ]] || fail 'explicitly disabled daemon NAT must remain unchanged'
+    jq -e '.config["ipv4.nat"] == "false"' <<<"$mock_network" >/dev/null || fail 'explicitly disabled daemon NAT was changed'
 )
-printf 'Incus panel initialization passed (19 scenarios, no skipped tests)\n'
+# Keep the original recovery/customization scenarios above. Exercise the
+# actual entry points on jq 1.6 too: -e alone does not reject empty input.
+boundary_cases=0
+for resource in profile network; do
+    for failure in whitespace null scalar array malformed multiple error missing_metadata null_metadata array_metadata failed_status missing_schema wrong_schema wrong_field command_failure; do
+        (
+            set +o pipefail
+            mock_envelope=false
+            : >"$mock_dir/calls"
+            if [[ "$resource" == profile ]]; then
+                payload=$mock_profile
+            else
+                payload=$mock_network
+            fi
+            case "$failure" in
+                whitespace) payload=$' \n\t' ;;
+                null) payload=null ;;
+                scalar) payload='"unexpected"' ;;
+                array) payload='[]' ;;
+                malformed) payload='{' ;;
+                multiple) payload="$payload $payload" ;;
+                error) payload=$(jq -cn --argjson metadata "$payload" '{type:"error",metadata:$metadata}') ;;
+                missing_metadata) payload='{"type":"sync"}' ;;
+                null_metadata) payload='{"type":"sync","metadata":null}' ;;
+                array_metadata) payload='{"type":"sync","metadata":[]}' ;;
+                failed_status) payload=$(jq -cn --argjson metadata "$payload" '{type:"sync",status_code:500,metadata:$metadata}') ;;
+                missing_schema) payload=$(jq 'del(.devices, .config)' <<<"$payload") ;;
+                wrong_schema)
+                    if [[ "$resource" == profile ]]; then payload='{"devices":[]}';
+                    else payload=$(jq '.config=[]' <<<"$payload"); fi ;;
+                wrong_field)
+                    if [[ "$resource" == profile ]]; then payload='{"devices":{"root":{"type":"disk","path":"/","pool":[]}}}';
+                    else payload=$(jq '.config["ipv4.nat"]=false' <<<"$payload"); fi ;;
+                command_failure) : ;;
+            esac
+            if [[ "$resource" == profile ]]; then mock_profile=$payload; else mock_network=$payload; fi
+            if [[ "$failure" == command_failure ]]; then
+                emit_api() { printf '%s\n' "$1"; return 42; }
+            fi
+            if [[ "$resource" == profile ]]; then
+                if ensure_default_profile_devices; then fail "$failure profile unexpectedly accepted"; fi
+            else
+                if configure_default_network_settings; then fail "$failure network unexpectedly accepted"; fi
+            fi
+            if verify_runtime_network; then fail "readiness accepted $failure $resource"; fi
+            [[ "$(mutation_count)" == 0 ]] || fail "$failure $resource caused a mutation"
+        )
+        boundary_cases=$((boundary_cases + 1))
+    done
+done
+printf 'Incus panel initialization passed (19 original + %s boundary scenarios, no skipped tests)\n' "$boundary_cases"

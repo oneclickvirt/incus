@@ -117,4 +117,46 @@ for distro in Fedora CentOS; do
         fi
     )
 done
-printf 'Incus package/helper and sysctl compatibility checks passed (73 scenarios)\n'
+
+# A minimal Debian host can install the Incus/LXD runtime without the
+# dnsmasq executable that managed-network initialization invokes.  Keep the
+# package-name mapping covered for both the Incus installer and the panel
+# helper so this failure is caught before a real daemon init.
+for installer in "$repo_root/scripts/incus_install.sh" "$repo_root/panel_scripts/panel_init.sh"; do
+    load_function "$installer" install_dnsmasq
+    for package_manager in apt non_apt; do
+        (
+            mock_dnsmasq=false
+            installed_package=''
+            PACKAGETYPE="$package_manager"
+            command() {
+                if [[ "$1" == -v && "$2" == dnsmasq ]]; then
+                    $mock_dnsmasq
+                    return
+                fi
+                # Keep the synthetic non-apt branch independent from the
+                # Debian container that runs this test. Without this guard,
+                # the host's real apt-get leaks into the mocked package
+                # manager and makes the assertion depend on the test image.
+                if [[ "$1" == -v && "$2" == apt-get && "$package_manager" != apt ]]; then
+                    return 1
+                fi
+                if [[ "$package_manager" == apt && "$1" == -v && "$2" == apt-get ]]; then
+                    return 0
+                fi
+                builtin command "$@"
+            }
+            install_package() {
+                installed_package="$1"
+                mock_dnsmasq=true
+            }
+            install_dnsmasq || fail "$installer/$package_manager must install dnsmasq"
+            if [[ "$package_manager" == apt ]]; then
+                [[ "$installed_package" == dnsmasq-base ]] || fail "$installer selected $installed_package instead of dnsmasq-base"
+            else
+                [[ "$installed_package" == dnsmasq ]] || fail "$installer selected $installed_package instead of dnsmasq"
+            fi
+        )
+    done
+done
+printf 'Incus package/helper and sysctl compatibility checks passed (77 scenarios)\n'

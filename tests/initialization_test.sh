@@ -7,7 +7,7 @@ installer_source=$(<"$installer")
 load_function() {
     source <(awk -v name="$1" '$0 == name "() {" { printing=1 } printing { print } printing && /^}$/ { exit }' "$installer" | sed 's#/snap/bin/lxc#lxc#g')
 }
-for name in api_metadata valid_storage_pool_name active_storage_pool storage_pool_exists ensure_runtime_network; do load_function "$name"; done
+for name in runtime_resource_names api_metadata valid_storage_pool_name active_storage_pool storage_pool_exists ensure_runtime_network; do load_function "$name"; done
 _green() { :; }
 _yellow() { :; }
 _red() { printf '%s\n' "$*" >&2; }
@@ -28,6 +28,25 @@ grep -Fq 'install_gpg()' <<<"$installer_source" ||
     fail 'Incus installer must map gpg executable to distro package names'
 grep -Fq 'systemctl daemon-reload 2>/dev/null; then' <<<"$installer_source" ||
     fail 'Incus service-manager must propagate daemon-reload failures'
+grep -Fq 'service_manager start incus 2>/dev/null || return 1' <<<"$installer_source" ||
+    fail 'Incus main installer must propagate the initial daemon start failure'
+grep -Fq 'service_manager enable incus-lvm-losetup.service || return 1' <<<"$installer_source" ||
+    fail 'Incus LVM restore service setup must propagate enable failures'
+grep -Fq 'service_manager enable incus-zfs-import.service || return 1' <<<"$installer_source" ||
+    fail 'Incus ZFS restore service setup must propagate enable failures'
+grep -Fq "ExecStart=/bin/bash -c 'set -eu;" <<<"$installer_source" ||
+    fail 'Incus systemd storage restore units must fail closed'
+if grep -Fq 'vgchange -ay incus_vg 2>/dev/null || true' <<<"$installer_source" ||
+   grep -Fq 'zpool import -d \\$(dirname "$loop_file") "$zpool_name" 2>/dev/null || true' <<<"$installer_source"; then
+    fail 'Incus storage restore must not hide activation/import failures'
+fi
+for helper in "$repo_root/scripts/init.sh" "$repo_root/scripts/least.sh" "$repo_root/scripts/rules.sh"; do
+    helper_source=$(<"$helper")
+    grep -Fq 'nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || return 1' <<<"$helper_source" ||
+        fail "firewall helper must propagate nft rule insertion failures: $helper"
+    grep -Fq 'iptables --ipv4 -I FORWARD' <<<"$helper_source" ||
+        fail "firewall helper lost IPv4 blocking path: $helper"
+done
 if grep -Fq 'install_package lsb_release' <<<"$installer_source"; then
     fail 'Incus installer must not install the lsb_release executable name as a package'
 fi
@@ -58,7 +77,7 @@ incus() {
     case "$*" in
         info) ! $mock_daemon_fails ;;
         'query /1.0/profiles/default') emit_api "$mock_profile" ;;
-        'storage list --format csv -c n') printf '%s\n' "$mock_pool_list" ;;
+        'storage list --format json') printf '%s\n' "$mock_pool_list" | jq -Rsc '[split("\n")[] | select(length > 0) | {name: .}]' ;;
         'storage show '*) grep -Fxq "$3" <<< "$mock_pool_list" ;;
         'profile list --format csv -c n') printf '%s\n' "$mock_profiles" ;;
         'profile create default') mock_profiles=default; mock_changes=$((mock_changes + 1)) ;;
@@ -68,7 +87,7 @@ incus() {
         'profile device add default eth0 nic network=incusbr0 name=eth0')
             mock_profile=$(jq '.devices.eth0 = {"type":"nic","network":"incusbr0","name":"eth0"}' <<< "$mock_profile")
             mock_changes=$((mock_changes + 1)) ;;
-        'network list --format csv -c n') if $mock_bridge_exists; then printf '%s\n' incusbr0; fi ;;
+        'network list --format json') if $mock_bridge_exists; then printf '[{"name":"incusbr0"}]\n'; else printf '[]\n'; fi ;;
         'network create incusbr0 ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none')
             $mock_network_create_fails && return 1
             mock_bridge_exists=true; mock_changes=$((mock_changes + 1)) ;;
@@ -142,6 +161,37 @@ ip() {
 )
 # The panel entry point is a second installer path. Keep it fail-closed and
 # avoid re-enabling IPv6/DNS settings that an administrator explicitly chose.
+# Failed CLI commands and malformed payloads must not become empty defaults,
+# even when the production shell does not enable pipefail (Debian jq 1.6).
+for resource in profile network; do
+    for failure in empty whitespace multiple malformed null wrong_schema wrong_field command_failure; do
+        (
+            set +o pipefail
+            mock_api_envelope=false mock_bridge_exists=true
+            mock_profile='{"devices":{"root":{"type":"disk","path":"/","pool":"local"},"eth0":{"type":"nic","network":"incusbr0"}}}'
+            if [[ "$resource" == profile ]]; then payload=$mock_profile; else payload=$mock_network_config; fi
+            case "$failure" in
+                empty) payload='' ;;
+                whitespace) payload=$' \n\t' ;;
+                multiple) payload="$payload $payload" ;;
+                malformed) payload='{' ;;
+                null) payload=null ;;
+                wrong_schema)
+                    if [[ "$resource" == profile ]]; then payload='{"devices":[]}';
+                    else payload=$(jq '.config=[]' <<<"$payload"); fi ;;
+                wrong_field)
+                    if [[ "$resource" == profile ]]; then payload='{"devices":{"root":null}}';
+                    else payload=$(jq '.config["ipv4.dhcp"]=false' <<<"$payload"); fi ;;
+                command_failure) emit_api() { printf '%s\n' "$1"; return 42; } ;;
+            esac
+            if [[ "$resource" == profile ]]; then mock_profile=$payload; else mock_network_config=$payload; fi
+            if ensure_runtime_network; then fail "$failure $resource must be rejected"; fi
+            [[ "$mock_changes" == 0 ]] || fail "$failure $resource caused initialization writes"
+        )
+    done
+done
+printf 'Installer API boundaries passed (16 additional scenarios, no skipped tests)\n'
+
 panel_init="$repo_root/panel_scripts/panel_init.sh"
 grep -Fq 'ensure_runtime_storage || exit 1' "$panel_init" || fail 'panel init must repair an empty storage configuration before profile/network setup'
 grep -Fq 'incus admin init --auto' "$panel_init" || fail 'panel init must initialize an uninitialized Incus daemon'

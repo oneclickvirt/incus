@@ -14,6 +14,95 @@ state_file() {
     printf '%s/%s\n' "${INCUS_STATE_DIR%/}" "$1"
 }
 
+# Keep the IPv6 probe in a dedicated cron.d file.  Updating the root user's
+# crontab with `crontab -l | crontab -` is racy with administrators and with
+# other provisioning jobs, and a timeout in one caller could otherwise erase
+# unrelated scheduled work.  The paths are overridable for isolated tests.
+cron_path_has_symlink() {
+    local path="$1" prefix component rest
+    [ -n "$path" ] || return 1
+    case "$path" in
+        /*) prefix=/; rest=${path#/} ;;
+        *) prefix=.; rest=$path ;;
+    esac
+    while [ -n "$rest" ]; do
+        component=${rest%%/*}
+        if [ "$rest" = "$component" ]; then
+            rest=
+        else
+            rest=${rest#*/}
+        fi
+        [ -n "$component" ] || continue
+        if [ "$prefix" = / ]; then
+            prefix="/$component"
+        elif [ "$prefix" = . ]; then
+            prefix="./$component"
+        else
+            prefix="$prefix/$component"
+        fi
+        [ -L "$prefix" ] && return 0
+    done
+    return 1
+}
+
+append_cron_once() {
+    local cron_line="$1"
+    local cron_dir="${OCV_IPV6_CRON_DIR:-/etc/cron.d}"
+    local cron_file="${OCV_IPV6_CRON_FILE:-$cron_dir/oneclickvirt-ipv6}"
+    local lock_file="${OCV_IPV6_CRON_LOCK:-/run/lock/oneclickvirt-ipv6.lock}"
+    local lock_dir=${lock_file%/*} lock_fd current tmp last_byte
+    [ "$lock_dir" != "$lock_file" ] || lock_dir=.
+    command -v flock >/dev/null 2>&1 || return 1
+    cron_path_has_symlink "$cron_dir" && return 1
+    [ -e "$cron_dir" ] || mkdir -p "$cron_dir" || return 1
+    [ -d "$cron_dir" ] || return 1
+    cron_path_has_symlink "$cron_file" && return 1
+    [ -e "$cron_file" ] && [ -f "$cron_file" ] || [ ! -e "$cron_file" ] || return 1
+    cron_path_has_symlink "$lock_dir" && return 1
+    [ -e "$lock_dir" ] || mkdir -p "$lock_dir" || return 1
+    [ -d "$lock_dir" ] || return 1
+    [ -L "$lock_file" ] && return 1
+    exec {lock_fd}>>"$lock_file" || return 1
+    if ! flock -x "$lock_fd"; then
+        exec {lock_fd}>&-
+        return 1
+    fi
+    # Re-check after acquiring the lock in case another process replaced a
+    # path between the preflight checks and open(2).
+    if cron_path_has_symlink "$cron_dir" || cron_path_has_symlink "$cron_file" ||
+        cron_path_has_symlink "$lock_dir" || [ -L "$cron_file" ] || [ -L "$lock_file" ]; then
+        flock -u "$lock_fd"; exec {lock_fd}>&-
+        return 1
+    fi
+    if [ -f "$cron_file" ] && grep -Fqx "$cron_line" "$cron_file" 2>/dev/null; then
+        flock -u "$lock_fd"; exec {lock_fd}>&-
+        return 0
+    fi
+    current="$cron_file"
+    tmp=$(mktemp "${current}.tmp.XXXXXX") || {
+        flock -u "$lock_fd"; exec {lock_fd}>&-
+        return 1
+    }
+    if [ -f "$cron_file" ]; then
+        cat "$cron_file" >"$tmp" || { rm -f "$tmp"; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
+        last_byte=$(tail -c 1 "$cron_file" 2>/dev/null | od -An -t x1 | tr -d '[:space:]')
+        [ -z "$last_byte" ] || [ "$last_byte" = 0a ] || printf '\n' >>"$tmp" || {
+            rm -f "$tmp"; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1;
+        }
+    fi
+    if ! printf '%s\n' "$cron_line" >>"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$cron_file"; then
+        rm -f "$tmp"
+        flock -u "$lock_fd"; exec {lock_fd}>&-
+        return 1
+    fi
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+}
+
+setup_ipv6_cron() {
+    append_cron_once '*/1 * * * * root curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb && curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb'
+}
+
 has_unsafe_scalar_chars() {
     local value="$1"
     [[ "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *$'\033'* ]]
@@ -412,14 +501,9 @@ disable_legacy_link_local_cleanup() {
         { valid = 0 }
         END { exit !(valid && commands == 1) }
     ' "$legacy" || return 0
-    if command -v crontab >/dev/null 2>&1; then
-        current=$(crontab -l 2>/dev/null || true)
-        if printf '%s\n' "$current" | grep -Fq "$legacy"; then
-            printf '%s\n' "$current" |
-                awk -v path="$legacy" '{ line = $0; sub(/^[[:space:]]*@reboot[[:space:]]+/, "", line); if (line != path) print }' |
-                crontab - 2>/dev/null || true
-        fi
-    fi
+    # Do not rewrite the administrator's root crontab while removing a
+    # legacy helper.  The helper is no longer installed by this project and
+    # the dedicated cron.d entry above is independently managed.
     rm -f -- "$legacy"
 }
 
@@ -436,14 +520,20 @@ configure_ipv6_nat66_fallback() {
         [[ "$parent" =~ ^[A-Za-z0-9_.:-]+$ ]] && network="$parent"
         current=$(incus network get "$network" ipv6.address 2>/dev/null || true)
         if [ -z "$current" ] || [ "$current" = "none" ]; then
-            incus network set "$network" ipv6.address auto 2>/dev/null || true
+            if ! incus network set "$network" ipv6.address auto 2>/dev/null; then
+                _red "Unable to enable IPv6 addressing on ${network}; refusing NAT66 fallback." >&2
+                return 1
+            fi
         fi
-        incus network set "$network" ipv6.nat true 2>/dev/null || true
+        if ! incus network set "$network" ipv6.nat true 2>/dev/null; then
+            _red "Unable to enable IPv6 NAT on ${network}; refusing NAT66 fallback." >&2
+            return 1
+        fi
     fi
     existing_mode=$(cat "$(state_file incus_ipv6_mode)" 2>/dev/null || true)
     if [ "$existing_mode" != routed ] && [ "$existing_mode" != public-nat ] &&
         [ ! -s "$(state_file incus_ipv6_mapping_interface)" ]; then
-        write_atomic_scalar "$(state_file incus_ipv6_mode)" nat66 2>/dev/null || true
+        write_atomic_scalar "$(state_file incus_ipv6_mode)" nat66 2>/dev/null || return 1
     fi
     _yellow "No additional routed IPv6 address is available; retaining the container IPv6 network and enabling NAT66 where supported."
     _yellow "宿主机没有可分配的额外公网 IPv6；保留容器 IPv6 网络，并在支持时启用 NAT66。"
@@ -821,14 +911,15 @@ check_ipv6() {
 
 # 更新sysctl配置
 update_sysctl() {
-    sysctl_config="$1"  # 格式: key=value
+    local sysctl_config="$1" key value custom_conf
+    local use_etc_sysctl_conf=false
+    # 格式: key=value
     key="${sysctl_config%%=*}"
     value="${sysctl_config#*=}"
     # 目标配置文件（systemd 方式）
     custom_conf="/etc/sysctl.d/99-custom.conf"
-    mkdir -p /etc/sysctl.d
+    mkdir -p /etc/sysctl.d || return 1
     # 检查 /etc/sysctl.conf 是否存在并且在系统加载路径中
-    use_etc_sysctl_conf=false
     if [ -f /etc/sysctl.conf ]; then
         if grep -q "/etc/sysctl.conf" /etc/sysctl.d/README* 2>/dev/null || \
            grep -q "/etc/sysctl.conf" /lib/systemd/system/sysctl.service 2>/dev/null; then
@@ -839,25 +930,25 @@ update_sysctl() {
     if grep -q "^$sysctl_config" "$custom_conf" 2>/dev/null; then
         : # 已经有正确配置，跳过
     elif grep -q "^#$sysctl_config" "$custom_conf" 2>/dev/null; then
-        sed -i "s/^#$sysctl_config/$sysctl_config/" "$custom_conf"
+        sed -i "s/^#$sysctl_config/$sysctl_config/" "$custom_conf" || return 1
     elif grep -q "^$key" "$custom_conf" 2>/dev/null; then
-        sed -i "s|^$key.*|$sysctl_config|" "$custom_conf"
+        sed -i "s|^$key.*|$sysctl_config|" "$custom_conf" || return 1
     else
-        echo "$sysctl_config" >> "$custom_conf"
+        echo "$sysctl_config" >> "$custom_conf" || return 1
     fi
     # 如果系统还在用 /etc/sysctl.conf，也同步更新
     if [ "$use_etc_sysctl_conf" = true ]; then
         if grep -q "^$sysctl_config" /etc/sysctl.conf; then
             : # 已经有正确配置
         elif grep -q "^#$sysctl_config" /etc/sysctl.conf; then
-            sed -i "s/^#$sysctl_config/$sysctl_config/" /etc/sysctl.conf
+            sed -i "s/^#$sysctl_config/$sysctl_config/" /etc/sysctl.conf || return 1
         elif grep -q "^$key" /etc/sysctl.conf; then
-            sed -i "s|^$key.*|$sysctl_config|" /etc/sysctl.conf
+            sed -i "s|^$key.*|$sysctl_config|" /etc/sysctl.conf || return 1
         else
-            echo "$sysctl_config" >> /etc/sysctl.conf
+            echo "$sysctl_config" >> /etc/sysctl.conf || return 1
         fi
     fi
-    sysctl -w "$key=$value" >/dev/null 2>&1
+    sysctl -w "$key=$value" >/dev/null 2>&1 || return 1
 }
 
 # 等待容器启动
@@ -866,17 +957,28 @@ wait_for_container_running() {
     local timeout=24
     local interval=3
     local elapsed_time=0
+    local status info
     while [ $elapsed_time -lt $timeout ]; do
-        incus start "$container_name"
-        status=$(incus info "$container_name" | grep "RUNNING")
-        if [[ "$status" == *RUNNING* ]]; then
-            break
+        # Starting an already running instance is not an error for this
+        # idempotent readiness helper.  Query first, and only issue `start`
+        # when the current state is not RUNNING.
+        info=$(incus info "$container_name" 2>/dev/null) || return 1
+        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        if [ "$status" != RUNNING ]; then
+            incus start "$container_name" || return 1
+        fi
+        info=$(incus info "$container_name" 2>/dev/null) || return 1
+        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        if [ "$status" = RUNNING ]; then
+            return 0
         fi
         echo "Waiting for the container $container_name to run..."
         echo "${status}"
         sleep $interval
         elapsed_time=$((elapsed_time + interval))
     done
+    _red "Timed out waiting for the container $container_name to run" >&2
+    return 1
 }
 
 # 等待容器停止
@@ -885,17 +987,26 @@ wait_for_container_stopped() {
     local timeout=24
     local interval=3
     local elapsed_time=0
+    local status info
     while [ $elapsed_time -lt $timeout ]; do
-        incus stop "$container_name"
-        status=$(incus info "$container_name" | grep "STOPPED")
-        if [[ "$status" == *STOPPED* ]]; then
-            break
+        info=$(incus info "$container_name" 2>/dev/null) || return 1
+        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+        if [ "$status" = STOPPED ]; then
+            return 0
+        fi
+        if ! incus stop "$container_name" 2>/dev/null; then
+            info=$(incus info "$container_name" 2>/dev/null) || return 1
+            status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
+            [ "$status" = STOPPED ] || return 1
+            return 0
         fi
         echo "Waiting for the container $container_name to stop..."
         echo "${status}"
         sleep $interval
         elapsed_time=$((elapsed_time + interval))
     done
+    _red "Timed out waiting for the container $container_name to stop" >&2
+    return 1
 }
 
 # 获取容器内网IPv6地址
@@ -956,6 +1067,40 @@ get_ipv6_gateway_info() {
     else
         echo "N"
     fi
+}
+
+ensure_ipv6_default_route() {
+    local route iface gateway raw candidates="" output
+    route=$(ip -6 route show default 2>/dev/null || true)
+    [ -n "$route" ] && return 0
+    iface=$(detect_primary_ipv6_iface) || return 1
+    [[ "$iface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || return 1
+    while IFS= read -r raw; do
+        raw=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
+        [ -n "$raw" ] && candidates="${candidates}${raw}\n"
+    done < <(ip -6 neigh show dev "$iface" 2>/dev/null |
+        awk '$0 ~ /[[:space:]]router([[:space:]]|$)/ && $1 ~ /^[0-9A-Fa-f:]+$/ {print $1}')
+    if [ -z "$candidates" ] && command -v rdisc6 >/dev/null 2>&1; then
+        output=$(timeout 10 rdisc6 "$iface" 2>/dev/null || true)
+        while IFS= read -r raw; do
+            raw=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
+            [ -n "$raw" ] && candidates="${candidates}${raw}\n"
+        done < <(printf '%s\n' "$output" |
+            sed -nE 's/.*Router[[:space:]]*:[[:space:]]*([0-9A-Fa-f:]+).*/\1/p')
+    fi
+    [ -n "$candidates" ] || return 1
+    while IFS= read -r gateway; do
+        [ -n "$gateway" ] || continue
+        ip -6 route replace default via "$gateway" dev "$iface" metric 4096 2>/dev/null || continue
+        if ip -6 route show default dev "$iface" 2>/dev/null | grep -q '^default' &&
+           curl --noproxy '*' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1; then
+            _green "Recovered IPv6 default route via ${gateway} on ${iface}."
+            return 0
+        fi
+        ip -6 route del default via "$gateway" dev "$iface" metric 4096 2>/dev/null ||
+            ip -6 route del default dev "$iface" metric 4096 2>/dev/null || true
+    done < <(printf '%b' "$candidates" | awk 'NF && !seen[$0]++')
+    return 1
 }
 
 configure_routed_ipv6_device() {
@@ -1074,13 +1219,16 @@ setup_network_device_ipv6() {
     if [ -n "${network_cidr:-}" ] && [ -n "${host_ipv6:-}" ] && ipv6_pool_has_extra_address "$network_cidr" "$host_ipv6"; then
         # Linux suppresses ordinary router advertisements after forwarding is
         # enabled unless the uplink explicitly opts in. Keep SLAAC routes.
-        update_sysctl "net.ipv6.conf.${ipv6_network_name}.accept_ra=2"
-        # Proxying is needed only on the actual uplink. Do not make unrelated
-        # bridges and interfaces inherit NDP proxy behavior.
-        update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1"
-        update_sysctl "net.ipv6.conf.all.forwarding=1"
+        update_sysctl "net.ipv6.conf.${ipv6_network_name}.accept_ra=2" || return 1
+        # Incus refuses to start a routed NIC unless its global proxy NDP
+        # switch is enabled. Keep the uplink explicit too: this is required
+        # for upstream neighbor discovery, while the global key is the
+        # runtime's mandatory capability check.
+        update_sysctl "net.ipv6.conf.all.proxy_ndp=1" || return 1
+        update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1" || return 1
+        update_sysctl "net.ipv6.conf.all.forwarding=1" || return 1
         sysctl_path=$(which sysctl)
-        ${sysctl_path} -p
+        ${sysctl_path} -p || return 1
         found_ipv6=""
         while IFS= read -r candidate; do
             [ "$candidate" = "$host_ipv6" ] && continue
@@ -1097,37 +1245,35 @@ setup_network_device_ipv6() {
         incus_ipv6="$found_ipv6"
         _green "Conatiner $container_name IPV6:"
         _green "$incus_ipv6"
-        incus stop "$container_name"
+        if ! incus stop "$container_name" 2>/dev/null; then
+            incus info "$container_name" 2>/dev/null | grep -Fq 'Status: STOPPED' || return 1
+        fi
         sleep 3
-        wait_for_container_stopped "$container_name"
+        wait_for_container_stopped "$container_name" || return 1
         configure_routed_ipv6_device "$container_name" "$ipv6_network_name" "$incus_ipv6" || return 1
         sleep 3
         if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name"
-            firewall-cmd --reload
+            firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name" || return 1
+            firewall-cmd --reload || return 1
         elif command -v ufw >/dev/null 2>&1; then
-            ufw allow in on "$ipv6_network_name"
-            ufw allow out on "$ipv6_network_name"
-            ufw reload
+            ufw allow in on "$ipv6_network_name" || return 1
+            ufw allow out on "$ipv6_network_name" || return 1
+            ufw reload || return 1
         fi
-        incus start "$container_name"
+        incus start "$container_name" || return 1
         # A link-local address is required for RA/NDP and must never be
         # deleted merely because the default route uses a global gateway.
         disable_legacy_link_local_cleanup
         if [[ "$ipv6_gateway_fe80" == "Y" ]]; then
             _blue "Retaining the link-local IPv6 gateway on ${ipv6_network_name}."
         fi
-        local cron_line
-        cron_line='*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb'
-        if ! crontab -l 2>/dev/null | grep -Fqx "$cron_line"; then
-            (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
-        fi
-        echo "$incus_ipv6" >>"$container_name"_v6
-        write_atomic_scalar "$(state_file incus_ipv6_mode)" routed || true
+        setup_ipv6_cron || return 1
+        printf '%s\n' "$incus_ipv6" >>"${container_name}_v6" || return 1
+        write_atomic_scalar "$(state_file incus_ipv6_mode)" routed || return 1
     else
         _red "The selected IPv6 prefix has no additional address (a /128 host route is not a pool)." >&2
         _red "所选 IPv6 前缀没有可分配的额外地址（宿主 /128 不是地址池）。" >&2
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
 }
@@ -1139,11 +1285,11 @@ setup_iptables_ipv6() {
     local ipv6_length=$4
     local interface=$5
     if ! subnet_prefix=$(ipv6_allocation_network "$subnet_prefix" 2>/dev/null); then
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     if ! ipv6_pool_has_extra_address "$subnet_prefix" "${IPV6:-}"; then
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
@@ -1157,8 +1303,8 @@ setup_iptables_ipv6() {
         if command -v nft >/dev/null 2>&1; then
             use_nft=true
             if command -v systemctl >/dev/null 2>&1; then
-                systemctl enable nftables 2>/dev/null || true
-                systemctl start nftables 2>/dev/null || true
+                systemctl enable nftables 2>/dev/null || return 1
+                systemctl start nftables 2>/dev/null || return 1
             fi
         fi
     fi
@@ -1198,51 +1344,73 @@ setup_iptables_ipv6() {
     ip -6 addr replace "$IPV6"/"$ipv6_length" dev "$interface" || return 1
     if [ "$use_nft" = true ]; then
         # Use nftables for IPv6 DNAT (handles v6 natively)
-        nft add table ip6 incus_ipv6_nat 2>/dev/null || true
-        nft add chain ip6 incus_ipv6_nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || true
+        if ! nft list table ip6 incus_ipv6_nat >/dev/null 2>&1; then
+            nft add table ip6 incus_ipv6_nat 2>/dev/null || return 1
+        fi
+        if ! nft list chain ip6 incus_ipv6_nat prerouting >/dev/null 2>&1; then
+            nft add chain ip6 incus_ipv6_nat prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null || return 1
+        fi
         if ! nft list chain ip6 incus_ipv6_nat prerouting 2>/dev/null | grep -F -- "ip6 daddr $IPV6 dnat to $container_ipv6" >/dev/null 2>&1; then
-            nft add rule ip6 incus_ipv6_nat prerouting ip6 daddr "$IPV6" dnat to "$container_ipv6"
+            nft add rule ip6 incus_ipv6_nat prerouting ip6 daddr "$IPV6" dnat to "$container_ipv6" || return 1
         fi
         # Persist only our own tables, not incusd's managed 'incus' table
-        {
+        if ! {
             nft list table ip6 incus_ipv6_nat 2>/dev/null || true
             nft list table inet incus_masq 2>/dev/null || true
             nft list table inet incus_block 2>/dev/null || true
-        } > /etc/nftables.conf
+        } > /etc/nftables.conf; then
+            return 1
+        fi
         if command -v systemctl >/dev/null 2>&1; then
-            systemctl enable nftables 2>/dev/null || true
+            systemctl enable nftables 2>/dev/null || return 1
         fi
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        service_manager enable firewalld
-        service_manager start firewalld
+        service_manager enable firewalld || return 1
+        service_manager start firewalld || return 1
         sleep 3
         firewall-cmd --permanent --direct --query-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6" >/dev/null 2>&1 ||
-            firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
-        firewall-cmd --reload
+            firewall-cmd --permanent --direct --add-rule ipv6 nat PREROUTING 0 -d "$IPV6" -j DNAT --to-destination "$container_ipv6" || return 1
+        firewall-cmd --reload || return 1
     else
         # Fallback to ip6tables with persistence
         ip6tables -t nat -C PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" 2>/dev/null ||
-            ip6tables -t nat -A PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6"
+            ip6tables -t nat -A PREROUTING -d "$IPV6" -j DNAT --to-destination "$container_ipv6" || return 1
         if command -v apt >/dev/null 2>&1; then
             DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
         fi
-        mkdir -p /etc/iptables
-        ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
+        mkdir -p /etc/iptables || return 1
+        ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || return 1
         if command -v netfilter-persistent >/dev/null 2>&1; then
-            netfilter-persistent save 2>/dev/null || true
+            netfilter-persistent save 2>/dev/null || return 1
         fi
     fi
     # Install add-ipv6 reboot restoration service
     if [ ! -f /usr/local/bin/add-ipv6.sh ]; then
-        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.sh" -O /usr/local/bin/add-ipv6.sh
-        chmod +x /usr/local/bin/add-ipv6.sh
+        local script_tmp
+        script_tmp=$(mktemp /usr/local/bin/add-ipv6.sh.tmp.XXXXXX) || return 1
+        if ! wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.sh" -O "$script_tmp"; then
+            rm -f -- "$script_tmp"
+            _red "Failed to download add-ipv6.sh"
+            _red "下载 add-ipv6.sh 失败"
+            return 1
+        fi
+        chmod +x "$script_tmp"
+        mv -f -- "$script_tmp" /usr/local/bin/add-ipv6.sh
     fi
     if [ ! -f /etc/systemd/system/add-ipv6.service ]; then
-        wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.service" -O /etc/systemd/system/add-ipv6.service
-        chmod +x /etc/systemd/system/add-ipv6.service
-        service_manager daemon-reload
-        service_manager enable add-ipv6.service
-        service_manager start add-ipv6.service
+        local service_tmp
+        service_tmp=$(mktemp /etc/systemd/system/add-ipv6.service.tmp.XXXXXX) || return 1
+        if ! wget "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/add-ipv6.service" -O "$service_tmp"; then
+            rm -f -- "$service_tmp"
+            _red "Failed to download add-ipv6.service"
+            _red "下载 add-ipv6.service 失败"
+            return 1
+        fi
+        chmod +x "$service_tmp"
+        mv -f -- "$service_tmp" /etc/systemd/system/add-ipv6.service
+        service_manager daemon-reload || return 1
+        service_manager enable add-ipv6.service || return 1
+        service_manager start add-ipv6.service || return 1
     fi
     if ping6 -c 3 "$IPV6" &>/dev/null; then
         _green "$container_name The external IPV6 address of the container is $IPV6"
@@ -1269,28 +1437,33 @@ main() {
     install_package cron
     install_package python3
     if ! IPV6=$(check_ipv6 2>/dev/null); then
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
+        return 0
+    fi
+    if ! ensure_ipv6_default_route; then
+        _red "A public IPv6 address exists but no verified IPv6 default route is available." >&2
+        _yellow "Falling back to the managed network's NAT66 mode." >&2
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     interface=$(ipv6_uplink_interface "$IPV6" 2>/dev/null || true)
     if [ -z "$interface" ] || has_unsafe_scalar_chars "$interface" || [[ ! "$interface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; then
         _red "Unable to detect one valid network interface" >&2
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     _yellow "NIC $interface"
     _yellow "网卡 $interface"
-    incus start "$CONTAINER_NAME"
+    wait_for_container_running "$CONTAINER_NAME" || return 1
     sleep 3
-    wait_for_container_running "$CONTAINER_NAME"
     if ! CONTAINER_IPV6=$(get_container_ipv6 "$CONTAINER_NAME"); then
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     ipv6_address=$(ipv6_uplink_cidr "$interface" "$IPV6" 2>/dev/null || true)
     ipv6_address=$(normalize_ipv6_interface "$ipv6_address" 2>/dev/null) || {
         _red "Unable to detect one valid host IPv6 interface address" >&2
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     }
     if [[ $ipv6_address == */* ]]; then
@@ -1306,7 +1479,7 @@ main() {
     fi
     if ! SUBNET_PREFIX=$(ipv6_allocation_network "$ipv6_address" 2>/dev/null) ||
         ! ipv6_pool_has_extra_address "$SUBNET_PREFIX" "${ipv6_address%/*}"; then
-        configure_ipv6_nat66_fallback
+        configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     ipv6_gateway_fe80=$(get_ipv6_gateway_info)

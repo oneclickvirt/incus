@@ -11,6 +11,8 @@ CPU_THRESHOLD=80.0
 CPU_LIMIT=70
 MAX_COUNT=3
 MAX_LOG_LINES=1000
+CRON_FILE="${INCUS_FIXED_RESTART_CRON_FILE:-/etc/cron.d/incus-fixed-restart}"
+CRON_LOCK="${INCUS_FIXED_RESTART_CRON_LOCK:-/run/lock/incus-fixed-restart.lock}"
 
 run_as_root_logged() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -217,24 +219,77 @@ install_self() {
         echo "Installed to $INSTALL_PATH"
     fi
     
-    crontab -l 2>/dev/null | grep -q "$INSTALL_PATH"
-    if [ $? -ne 0 ]; then
-        (crontab -l 2>/dev/null; echo "*/1 * * * * $INSTALL_PATH") | crontab -
-        echo "Cron job installed (runs every minute)"
-    else
-        echo "Cron job already exists"
-    fi
+    install_cron_job || return 1
+    echo "Cron job installed (runs every minute)"
 }
 
 uninstall_self() {
     remove_cpulimit
-    crontab -l 2>/dev/null | grep -v "$INSTALL_PATH" | crontab -
+    remove_cron_job || return 1
     echo "Cron job removed"
     rm -f "$INSTALL_PATH"
     rm -f "$LOG_FILE"
     rm -f "$COUNTER_FILE"
     rm -f "$CPULIMIT_PID_FILE"
     echo "Files removed"
+}
+
+install_cron_job() {
+    local cron_dir=${CRON_FILE%/*} lock_dir=${CRON_LOCK%/*} tmp
+    [ "$cron_dir" != "$CRON_FILE" ] || cron_dir=.
+    [ "$lock_dir" != "$CRON_LOCK" ] || lock_dir=.
+    command -v flock >/dev/null 2>&1 || return 1
+    [ -L "$cron_dir" ] || mkdir -p "$cron_dir" || return 1
+    [ -d "$cron_dir" ] || return 1
+    [ -L "$CRON_FILE" ] && return 1
+    [ ! -e "$CRON_FILE" ] || [ -f "$CRON_FILE" ] || return 1
+    [ -L "$lock_dir" ] || mkdir -p "$lock_dir" || return 1
+    [ -d "$lock_dir" ] || return 1
+    [ -L "$CRON_LOCK" ] && return 1
+    exec 9>>"$CRON_LOCK" || return 1
+    flock -x 9 || { exec 9>&-; return 1; }
+    tmp=$(mktemp "${CRON_FILE}.tmp.XXXXXX") || { flock -u 9; exec 9>&-; return 1; }
+    if [ -e "$CRON_FILE" ] && ! grep -Fqx "*/1 * * * * root $INSTALL_PATH" "$CRON_FILE"; then
+        rm -f "$tmp"; flock -u 9; exec 9>&-
+        return 1
+    fi
+    if ! printf '%s\n' '# Managed by OneClickVirt: incus fixed restart' 'SHELL=/bin/sh' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "*/1 * * * * root $INSTALL_PATH" >"$tmp" ||
+        ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$CRON_FILE"; then
+        rm -f "$tmp"; flock -u 9; exec 9>&-
+        return 1
+    fi
+    flock -u 9
+    exec 9>&-
+}
+
+remove_cron_job() {
+    local lock_dir=${CRON_LOCK%/*}
+    [ "$lock_dir" != "$CRON_LOCK" ] || lock_dir=.
+    command -v flock >/dev/null 2>&1 || return 1
+    [ -L "$CRON_FILE" ] && return 1
+    [ ! -e "$CRON_FILE" ] && return 0
+    [ -f "$CRON_FILE" ] || return 1
+    [ -L "$lock_dir" ] || mkdir -p "$lock_dir" || return 1
+    [ -L "$CRON_LOCK" ] && return 1
+    exec 9>>"$CRON_LOCK" || return 1
+    flock -x 9 || { exec 9>&-; return 1; }
+    custom_lines=$(awk -v path="$INSTALL_PATH" '
+        $0 == "# Managed by OneClickVirt: incus fixed restart" ||
+        $0 == "SHELL=/bin/sh" ||
+        $0 == "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ||
+        $0 == "*/1 * * * * root " path ||
+        /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
+        { count++ }
+        END { print count + 0 }
+    ' "$CRON_FILE")
+    if grep -Fqx "*/1 * * * * root $INSTALL_PATH" "$CRON_FILE" && [ "$custom_lines" -eq 0 ]; then
+        rm -f -- "$CRON_FILE"
+    else
+        flock -u 9; exec 9>&-
+        return 1
+    fi
+    flock -u 9
+    exec 9>&-
 }
 
 case "$1" in

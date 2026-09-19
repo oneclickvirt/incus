@@ -73,7 +73,7 @@ add_nft_rule_once() {
     local chain="$3"
     local pattern="$4"
     shift 4
-    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || true
+    nft_rule_exists "$family" "$table" "$chain" "$pattern" || nft add rule "$family" "$table" "$chain" "$@" 2>/dev/null || return 1
 }
 
 add_iptables_drop_once() {
@@ -81,13 +81,13 @@ add_iptables_drop_once() {
     local proto="$2"
     local port="$3"
     iptables --ipv4 -C FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null ||
-        iptables --ipv4 -I FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null || true
+        iptables --ipv4 -I FORWARD -o "$iface" -p "$proto" --dport "$port" -j DROP 2>/dev/null || return 1
 }
 
 add_iptables_site_drop_once() {
     local site="$1"
     iptables -C OUTPUT -d "$site" -j DROP -m comment --comment "block $site" 2>/dev/null ||
-        iptables -A OUTPUT -d "$site" -j DROP -m comment --comment "block $site" 2>/dev/null || true
+        iptables -A OUTPUT -d "$site" -j DROP -m comment --comment "block $site" 2>/dev/null || return 1
 }
 
 detect_primary_iface() {
@@ -151,34 +151,34 @@ blocked_sites=("zmap.io" "nmap.org" "foofus.net")
 
 if ensure_nftables; then
     # Use nftables for port blocking and website blocking
-    nft add table inet incus_block 2>/dev/null || true
-    nft add chain inet incus_block forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
-    nft add chain inet incus_block output '{ type filter hook output priority filter; policy accept; }' 2>/dev/null || true
+    nft add table inet incus_block 2>/dev/null || exit 1
+    nft list chain inet incus_block forward >/dev/null 2>&1 || nft 'add chain inet incus_block forward { type filter hook forward priority filter; policy accept; }' 2>/dev/null || exit 1
+    nft list chain inet incus_block output >/dev/null 2>&1 || nft 'add chain inet incus_block output { type filter hook output priority filter; policy accept; }' 2>/dev/null || exit 1
     for port in "${blocked_ports[@]}"; do
-        add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop
-        add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop
+        add_nft_rule_once inet incus_block forward "oifname \"$iface\" tcp dport $port drop" oifname "$iface" tcp dport "$port" drop || exit 1
+        add_nft_rule_once inet incus_block forward "oifname \"$iface\" udp dport $port drop" oifname "$iface" udp dport "$port" drop || exit 1
     done
     for site in "${blocked_sites[@]}"; do
         # Resolve site IPs and block them
         site_ips=$(getent ahosts "$site" 2>/dev/null | awk '{print $1}' | sort -u)
         for ip in $site_ips; do
             if echo "$ip" | grep -q ':'; then
-                add_nft_rule_once inet incus_block output "ip6 daddr $ip drop" ip6 daddr "$ip" drop
+                add_nft_rule_once inet incus_block output "ip6 daddr $ip drop" ip6 daddr "$ip" drop || exit 1
             else
-                add_nft_rule_once inet incus_block output "ip daddr $ip drop" ip daddr "$ip" drop
+                add_nft_rule_once inet incus_block output "ip daddr $ip drop" ip daddr "$ip" drop || exit 1
             fi
         done
     done
-    save_firewall_rules
+    save_firewall_rules || exit 1
 else
     # Fallback to iptables with persistence
     ensure_iptables_persistent
     for port in "${blocked_ports[@]}"; do
-        add_iptables_drop_once "$iface" tcp "$port"
-        add_iptables_drop_once "$iface" udp "$port"
+        add_iptables_drop_once "$iface" tcp "$port" || exit 1
+        add_iptables_drop_once "$iface" udp "$port" || exit 1
     done
     for site in "${blocked_sites[@]}"; do
-        add_iptables_site_drop_once "$site"
+        add_iptables_site_drop_once "$site" || exit 1
     done
-    save_firewall_rules
+    save_firewall_rules || exit 1
 fi

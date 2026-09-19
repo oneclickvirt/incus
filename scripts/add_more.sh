@@ -3,6 +3,36 @@
 # https://github.com/oneclickvirt/incus
 # 2026.08.30
 
+# Load before changing directory or touching shared downloads and logs.
+load_instance_ownership() {
+    local script_dir helper temporary
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    for helper in "$script_dir/instance_ownership.sh" /usr/local/bin/instance_ownership.sh /root/instance_ownership.sh; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper" || return 1
+            return 0
+        fi
+    done
+    temporary=$(mktemp "${TMPDIR:-/tmp}/incus-ownership.XXXXXX") || return 1
+    if ! curl -fsSL "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ownership.sh" -o "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    . "$temporary"
+    local status=$?
+    rm -f -- "$temporary"
+    return "$status"
+}
+load_instance_ownership || { echo "Missing instance_ownership.sh; download it with this script." >&2; exit 1; }
+OCV_SCRIPT_RUNTIME=incus
+OCV_INSTANCE_CLI=incus
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    ocv_lock_scripts || exit 1
+fi
+
+
 # cd /root
 red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 green() { echo -e "\033[32m\033[01m$*\033[0m"; }
@@ -41,11 +71,10 @@ if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
 fi
 
 is_noninteractive() {
-    case "${noninteractive:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
-    esac
-    case "${INCUS_NONINTERACTIVE:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-${INCUS_NONINTERACTIVE:-}}}"
+    export noninteractive
+    case "$noninteractive" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
     esac
     return 1
 }
@@ -193,6 +222,7 @@ add_batch_active=false
 add_batch_pending_log=""
 add_batch_commit_log=""
 add_batch_created=()
+add_batch_identities=()
 
 incus_instance_exists() {
     incus info "$1" >/dev/null 2>&1
@@ -200,23 +230,27 @@ incus_instance_exists() {
 
 track_add_batch_instance() {
     local candidate="$1"
+    local identity
+    identity=$(ocv_owned_identity "$candidate" "$add_creation_token") || return 1
     local tracked
     for tracked in "${add_batch_created[@]}"; do
         [ "$tracked" = "$candidate" ] && return 0
     done
     add_batch_created+=("$candidate")
+    add_batch_identities+=("$identity")
 }
 
 rollback_add_batch() {
     local index container_name
     for ((index = ${#add_batch_created[@]} - 1; index >= 0; index--)); do
         container_name="${add_batch_created[index]}"
-        incus delete --force "$container_name" >/dev/null 2>&1 || true
+        ocv_remove_owned_instance "$container_name" "${add_batch_identities[index]}" || echo "Failed to roll back instance: $container_name" >&2
         rm -f -- "$container_name"
     done
     [ -z "$add_batch_pending_log" ] || rm -f -- "$add_batch_pending_log"
     [ -z "$add_batch_commit_log" ] || rm -f -- "$add_batch_commit_log"
     add_batch_created=()
+    add_batch_identities=()
     add_batch_pending_log=""
     add_batch_commit_log=""
     add_batch_active=false
@@ -413,13 +447,12 @@ build_new_containers() {
             red "Container ${container_name} already exists; the existing instance was not changed"
             return 1
         fi
-        if ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system" "$template"; then
-            track_add_batch_instance "$container_name"
+        add_creation_token=$(ocv_new_creation_token) || return 1
+        if _OCV_CREATE_TOKEN="$add_creation_token" ./buildct.sh "$container_name" "$cpu_nums" "$memory_nums" "$disk_nums" "$ssh_port" "$public_port_start" "$public_port_end" "$input_nums" "$output_nums" "$status_ipv6" "$system" "$template"; then
+            track_add_batch_instance "$container_name" || return 1
         else
             build_status=$?
-            if incus_instance_exists "$container_name"; then
-                track_add_batch_instance "$container_name"
-            fi
+            track_add_batch_instance "$container_name" || true
             red "容器 ${container_name} 创建失败，已停止后续批量创建"
             red "Container ${container_name} creation failed; remaining batch items were not started"
             rm -f -- "$container_name"
@@ -445,6 +478,7 @@ build_new_containers() {
     rm -f -- "$add_batch_pending_log"
     add_batch_pending_log=""
     add_batch_created=()
+    add_batch_identities=()
     add_batch_active=false
 }
 

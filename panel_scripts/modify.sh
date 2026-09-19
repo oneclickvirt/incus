@@ -29,6 +29,10 @@ detect_container_system() {
     ' 2>/dev/null | tr '[:upper:]' '[:lower:]'
 }
 
+ensure_container_ipv6_cron() {
+    incus exec "$name" -- /bin/sh -c 'set -eu; if [ -L /etc/cron.d ]; then exit 1; fi; [ -d /etc/cron.d ] || exit 0; mkdir -p /run/lock; test ! -L /run/lock; lock=/run/lock/oneclickvirt-ipv6.lock.d; acquired=0; i=0; while [ "$i" -lt 100 ]; do if mkdir "$lock" 2>/dev/null; then acquired=1; break; fi; i=$((i + 1)); sleep 0.1; done; [ "$acquired" -eq 1 ]; trap '\''rmdir "$lock" 2>/dev/null || true'\'' EXIT; target=/etc/cron.d/oneclickvirt-ipv6; line="*/1 * * * * root curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1 && curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1"; if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then exit 1; fi; if [ -f "$target" ] && grep -Fqx "$line" "$target"; then exit 0; fi; tmp=$(mktemp /etc/cron.d/.oneclickvirt-ipv6.XXXXXX); trap '\''rm -f -- "$tmp"; rmdir "$lock" 2>/dev/null || true'\'' EXIT; if [ -f "$target" ]; then cat "$target" >"$tmp"; last=$(tail -c 1 "$target" 2>/dev/null | od -An -t x1 | tr -d "[:space:]"); [ -z "$last" ] || [ "$last" = 0a ] || printf "\n" >>"$tmp"; fi; printf "%s\n" "$line" >>"$tmp"; chmod 0644 "$tmp"; mv -f "$tmp" "$target"'
+}
+
 generate_password() {
     local generated=""
     if command -v openssl >/dev/null 2>&1; then
@@ -99,7 +103,8 @@ else
     incus exec "$name" -- chmod +x config.sh
     incus exec "$name" -- dos2unix config.sh
     incus exec "$name" -- bash config.sh
-    incus exec "$name" -- history -c
+    # `history` is a Bash builtin; Incus exec needs a shell boundary.
+    incus exec "$name" -- bash -c 'history -c'
 fi
 incus restart "$name"
 echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
@@ -124,7 +129,7 @@ echo "Host IPv4 address: $ipv4_address"
 # 是否要创建V6地址
 if [ -n "$7" ]; then
     if [[ "$7" =~ ^[Yy]$ ]]; then
-        incus exec "$name" -- /bin/sh -c 'cron_line="*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb"; crontab -l 2>/dev/null | grep -Fqx "$cron_line" || (crontab -l 2>/dev/null; echo "$cron_line") | crontab -'
+        ensure_container_ipv6_cron || exit 1
         sleep 1
         if [ ! -f "./build_ipv6_network.sh" ]; then
             # 如果不存在，则从指定 URL 下载并添加可执行权限

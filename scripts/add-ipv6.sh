@@ -85,7 +85,7 @@ restore_address() {
     local address="$1" interface="$2" prefix_len="$3"
     is_restorable_global_ipv6 "$address" || return 0
     if ! ip -6 addr show dev "$interface" 2>/dev/null | grep -Fqw "$address"; then
-        ip -6 addr replace "$address/$prefix_len" dev "$interface" 2>/dev/null || true
+        ip -6 addr replace "$address/$prefix_len" dev "$interface" 2>/dev/null || return 1
     fi
 }
 
@@ -122,17 +122,17 @@ if [ -f "$file" ]; then
 
     if [ ${#array[@]} -gt 0 ]; then
         for parameter in "${array[@]}"; do
-            restore_address "$parameter" "$interface" "$host_prefixlen"
+            restore_address "$parameter" "$interface" "$host_prefixlen" || return 1
         done
         # Restore ip6tables rules
         if command -v ip6tables-restore >/dev/null 2>&1; then
-            ip6tables-restore <"$file" 2>/dev/null || true
+            ip6tables-restore <"$file" 2>/dev/null || return 1
         elif command -v ip6tables-legacy-restore >/dev/null 2>&1; then
             ip6tables-legacy-restore <"$file" 2>/dev/null || true
         fi
         if command -v netfilter-persistent >/dev/null 2>&1; then
-            netfilter-persistent save 2>/dev/null || true
-            netfilter-persistent reload 2>/dev/null || true
+            netfilter-persistent save 2>/dev/null || return 1
+            netfilter-persistent reload 2>/dev/null || return 1
         fi
         return 0
     fi
@@ -144,9 +144,9 @@ if command -v nft >/dev/null 2>&1 && [ -f /etc/nftables.conf ]; then
     # Extract IPv6 addresses from nftables config for ip addr add
     nft_ipv6_addrs=$(grep -oE 'ip6 daddr [0-9A-Fa-f:]+([/][0-9]{1,3})?' /etc/nftables.conf 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
     for addr in $nft_ipv6_addrs; do
-        restore_address "$addr" "$interface" "$host_prefixlen"
+        restore_address "$addr" "$interface" "$host_prefixlen" || return 1
     done
-    nft -f /etc/nftables.conf 2>/dev/null || true
+    nft -f /etc/nftables.conf 2>/dev/null || return 1
     return 0
 fi
 

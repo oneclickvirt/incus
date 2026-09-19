@@ -3,6 +3,36 @@
 # https://github.com/oneclickvirt/incus
 # 2026.08.30
 
+# Load before changing directory or touching shared downloads and logs.
+load_instance_ownership() {
+    local script_dir helper temporary
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+    for helper in "$script_dir/instance_ownership.sh" /usr/local/bin/instance_ownership.sh /root/instance_ownership.sh; do
+        if [ -f "$helper" ]; then
+            # shellcheck source=/dev/null
+            . "$helper" || return 1
+            return 0
+        fi
+    done
+    temporary=$(mktemp "${TMPDIR:-/tmp}/incus-ownership.XXXXXX") || return 1
+    if ! curl -fsSL "https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/instance_ownership.sh" -o "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    . "$temporary"
+    local status=$?
+    rm -f -- "$temporary"
+    return "$status"
+}
+load_instance_ownership || { echo "Missing instance_ownership.sh; download it with this script." >&2; exit 1; }
+OCV_SCRIPT_RUNTIME=incus
+OCV_INSTANCE_CLI=incus
+if [ "${ONECLICKVIRT_TESTING:-}" != "1" ]; then
+    ocv_lock_scripts || exit 1
+fi
+
+
 load_image_lookup() {
     local script_path="${BASH_SOURCE[0]:-$0}"
     local script_dir helper
@@ -34,12 +64,13 @@ load_image_lookup
 # A failed create/configure operation must never fall through to the remaining
 # steps.  Keep the cleanup scoped to instances created by this invocation.
 created_instance=false
+created_identity=""
 build_succeeded=false
 cleanup_failed_instance() {
     local status=$?
     if [ "$created_instance" = true ] && [ "$build_succeeded" != true ] && [ -n "${name:-}" ] && command -v incus >/dev/null 2>&1; then
         local cleanup_output
-        if ! cleanup_output=$(incus delete --force "$name" 2>&1); then
+        if ! cleanup_output=$(ocv_remove_owned_instance "$name" "$created_identity" 2>&1); then
             echo "Warning: failed to roll back Incus instance '$name': $cleanup_output" >&2
             echo "警告：回滚删除 Incus 实例 '$name' 失败：$cleanup_output" >&2
         fi
@@ -60,19 +91,11 @@ incus_storage_pool() {
 }
 
 create_instance_with_tracking() {
-    local init_status
-    "$@"
-    init_status=$?
-    if [ "$init_status" -eq 0 ]; then
-        created_instance=true
-        return 0
-    fi
-    # Incus can persist the instance before a late error is returned (for
-    # example, while applying the profile or storage device). Treat that
-    # object as owned by this invocation so the EXIT cleanup removes it.
-    if incus info "$name" >/dev/null 2>&1; then
-        created_instance=true
-    fi
+    local init_status=0
+    ocv_create_owned "$name" "$@" || init_status=$?
+    created_identity="$ocv_created_identity"
+    created_instance=false
+    [ -z "$created_identity" ] || created_instance=true
     return "$init_status"
 }
 
@@ -275,9 +298,10 @@ retry_curl() {
     local delay=1
     _retry_result=""
     for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        _retry_result=$(curl -slk -m 6 "$url")
-        if [ $? -eq 0 ] && [ -n "$_retry_result" ]; then
-            return 0
+        if _retry_result=$(curl -slk -m 6 "$url"); then
+            if [ -n "$_retry_result" ]; then
+                return 0
+            fi
         fi
         sleep "$delay"
         delay=$((delay * 2))
@@ -575,7 +599,8 @@ setup_ssh_bash() {
     incus exec "$name" -- chmod +x config.sh || return 1
     incus exec "$name" -- dos2unix config.sh || return 1
     incus exec "$name" -- bash config.sh || return 1
-    incus exec "$name" -- history -c || return 1
+    # history is a Bash builtin, not an executable in the container.
+    incus exec "$name" -- bash -c 'history -c' || return 1
 }
 
 wait_for_container_ready_to_shutdown() {
@@ -630,6 +655,10 @@ safe_shutdown_container() {
     return 1
 }
 
+ensure_container_ipv6_cron() {
+    incus exec "$name" -- /bin/sh -c 'set -eu; if [ -L /etc/cron.d ]; then exit 1; fi; [ -d /etc/cron.d ] || exit 0; mkdir -p /run/lock; test ! -L /run/lock; lock=/run/lock/oneclickvirt-ipv6.lock.d; acquired=0; i=0; while [ "$i" -lt 100 ]; do if mkdir "$lock" 2>/dev/null; then acquired=1; break; fi; i=$((i + 1)); sleep 0.1; done; [ "$acquired" -eq 1 ]; trap '\''rmdir "$lock" 2>/dev/null || true'\'' EXIT; target=/etc/cron.d/oneclickvirt-ipv6; line="*/1 * * * * root curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1 && curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1"; if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then exit 1; fi; if [ -f "$target" ] && grep -Fqx "$line" "$target"; then exit 0; fi; tmp=$(mktemp /etc/cron.d/.oneclickvirt-ipv6.XXXXXX); trap '\''rm -f -- "$tmp"; rmdir "$lock" 2>/dev/null || true'\'' EXIT; if [ -f "$target" ]; then cat "$target" >"$tmp"; last=$(tail -c 1 "$target" 2>/dev/null | od -An -t x1 | tr -d "[:space:]"); [ -z "$last" ] || [ "$last" = 0a ] || printf "\n" >>"$tmp"; fi; printf "%s\n" "$line" >>"$tmp"; chmod 0644 "$tmp"; mv -f "$tmp" "$target"'
+}
+
 configure_network() {
     incus restart "$name" || return 1
     echo "Waiting for the container to start. Attempting to retrieve the container's IP address..."
@@ -653,7 +682,7 @@ configure_network() {
     echo "Host IPv4 address: $ipv4_address"
     if [ -n "$enable_ipv6" ]; then
         if [ "$enable_ipv6" == "y" ]; then
-            incus exec "$name" -- /bin/bash -c 'cron_line="*/1 * * * * curl -m 6 -s ipv6.ip.sb && curl -m 6 -s ipv6.ip.sb"; crontab -l 2>/dev/null | grep -Fqx "$cron_line" || (crontab -l 2>/dev/null; echo "$cron_line") | crontab -' || return 1
+            ensure_container_ipv6_cron || return 1
             sleep 1
             if [ ! -f "./build_ipv6_network.sh" ]; then
                 curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o build_ipv6_network.sh || return 1

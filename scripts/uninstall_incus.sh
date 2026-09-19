@@ -12,22 +12,63 @@
 #                                Backward-compatible force uninstall flag
 
 cd /root >/dev/null 2>&1 || exit 1
+command -v flock >/dev/null 2>&1 || {
+    printf '%s\n' 'flock (util-linux) is required before uninstalling / 卸载前需要安装 util-linux 的 flock。' >&2
+    exit 1
+}
 
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 
 is_noninteractive() {
-    case "${noninteractive:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
-    esac
-    case "${INCUS_NONINTERACTIVE:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-${INCUS_NONINTERACTIVE:-}}}"
+    export noninteractive
+    case "$noninteractive" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
     esac
     case "${INCUS_FORCE_UNINSTALL:-}" in
         true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
     esac
     return 1
+}
+
+# Package names differ between Debian and Zabbly. One unavailable optional
+# name makes apt reject the entire removal transaction, including installed
+# packages. Query once and remove only this runtime's present packages.
+uninstall_incus_debian_packages() {
+    local listing package state base
+    local packages=()
+    listing=$(dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n') || return 1
+    while IFS=$'\t' read -r package state; do
+        base="${package%%:*}"
+        case "$base" in
+            incus|incus-base|incus-client|incus-agent|incus-extra|incus-ui-canonical)
+                case "$state" in
+                    installed|config-files|unpacked|half-installed|half-configured|triggers-awaited|triggers-pending)
+                        packages+=("$package")
+                        ;;
+                esac
+                ;;
+        esac
+    done <<<"$listing"
+    [ "${#packages[@]}" -gt 0 ] || return 0
+    apt-get remove --purge -y "${packages[@]}"
+}
+
+stop_uninstalled_lxcfs() {
+    # lxcfs can be shared with another runtime. Only stop an orphan whose
+    # executable was actually removed by the package manager.
+    command -v lxcfs >/dev/null 2>&1 && return 0
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet lxcfs.service; then
+        systemctl stop lxcfs.service || return 1
+    fi
+    if command -v findmnt >/dev/null 2>&1 && findmnt -rn -M /var/lib/lxcfs >/dev/null 2>&1; then
+        _red "lxcfs 软件包已删除但挂载仍存在，请先停止残留服务。"
+        _red "The lxcfs package is gone but its mount remains; stop the orphaned service before retrying."
+        return 1
+    fi
+    return 0
 }
 
 # ==============================
@@ -83,6 +124,15 @@ if command -v incus >/dev/null 2>&1; then
         _yellow "  删除配置文件 / Deleting profile: $prof"
         incus profile delete "$prof" 2>/dev/null || true
     done
+    # The default root and NIC keep the pool and bridge marked as in use even
+    # after every guest is deleted. Detach them while the daemon still runs.
+    if incus profile show default >/dev/null 2>&1; then
+        default_devices=$(incus profile device list default) || exit 1
+        while IFS= read -r device; do
+            [ -n "$device" ] || continue
+            incus profile device remove default "$device" || exit 1
+        done <<<"$default_devices"
+    fi
 fi
 
 # ==============================
@@ -125,9 +175,11 @@ SERVICES=(
     coexistence.timer
     coexistence.service
     incus.service
+    incus.socket
     incusd.service
     incus-startup.service
     incus-user.service
+    incus-user.socket
 )
 for svc in "${SERVICES[@]}"; do
     if command -v systemctl >/dev/null 2>&1; then
@@ -198,7 +250,11 @@ done
 # ==============================
 _green "[6/9] 卸载 Incus 软件包 / Uninstalling Incus packages..."
 if command -v apt >/dev/null 2>&1; then
-    apt-get remove --purge -y incus incus-base incus-client incus-extra incus-ui-canonical 2>/dev/null || true
+    if ! uninstall_incus_debian_packages; then
+        _red "Incus 软件包卸载失败，已停止后续数据目录清理。请处理包管理器错误后重试。"
+        _red "Incus package removal failed; stopping before data-directory cleanup. Fix the package-manager error and retry."
+        exit 1
+    fi
     apt-get autoremove -y 2>/dev/null || true
     # 清除 Zabbly 仓库配置
     rm -f /etc/apt/sources.list.d/zabbly-incus-stable.sources
@@ -215,6 +271,7 @@ elif command -v apk >/dev/null 2>&1; then
 elif command -v xbps-remove >/dev/null 2>&1; then
     xbps-remove -R incus incus-client 2>/dev/null || true
 fi
+stop_uninstalled_lxcfs || exit 1
 
 # ==============================
 # 删除服务文件 / Remove service files
@@ -244,6 +301,7 @@ fi
 # ==============================
 _green "[8/9] 删除残留文件 / Removing leftover files..."
 LEFTOVER_FILES=(
+    /usr/local/bin/incus_storage_pool
     /usr/local/bin/incus_storage_type
     /usr/local/bin/incus_tried_storage
     /usr/local/bin/incus_installed_storage
@@ -254,6 +312,8 @@ LEFTOVER_FILES=(
     /usr/local/bin/ssh_sh.sh
     /usr/local/bin/config.sh
     /usr/local/bin/image_lookup.sh
+    /usr/local/bin/instance_ownership.sh
+    /root/instance_ownership.sh
     /usr/local/bin/buildct.sh
     /usr/local/bin/buildvm.sh
     /usr/local/bin/instance_ops.sh
@@ -302,13 +362,195 @@ if [ -f /etc/sysctl.d/99-custom.conf ]; then
     [ ! -s /etc/sysctl.d/99-custom.conf ] && rm -f /etc/sysctl.d/99-custom.conf
 fi
 
+remove_incus_firewalld_bridge() {
+    # A surviving interface may now belong to another caller; leave its zone.
+    command -v ip >/dev/null 2>&1 || return 1
+    if ip link show dev incusbr0 >/dev/null 2>&1; then return 0; fi
+    local state_status=127 zone status scope cli=firewall-cmd
+    local options=() scopes=(permanent)
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        state_status=0
+        firewall-cmd --state >/dev/null 2>&1 || state_status=$?
+    fi
+    if [ "$state_status" -eq 0 ]; then
+        scopes+=(runtime)
+    elif [ "$state_status" -eq 252 ]; then
+        command -v firewall-offline-cmd >/dev/null 2>&1 || return 1
+        cli=firewall-offline-cmd
+    else
+        [ ! -e /etc/firewalld/zones/trusted.xml ] && return 0
+        return 1
+    fi
+    for scope in "${scopes[@]}"; do
+        options=()
+        if [ "$scope" = permanent ] && [ "$state_status" -eq 0 ]; then options=(--permanent); fi
+        status=0
+        zone=$(LC_ALL=C "$cli" "${options[@]}" --get-zone-of-interface=incusbr0 2>&1) || status=$?
+        if [ "$status" -eq 0 ] && [ "$zone" = trusted ]; then
+            "$cli" "${options[@]}" --zone=trusted --remove-interface=incusbr0 || return 1
+        elif [ "$status" -eq 2 ] && [ "$zone" = 'no zone' ]; then
+            :
+        elif [ "$status" -ne 0 ]; then
+            return 1
+        fi
+        # Non-trusted zones were never assigned by this installer.
+    done
+}
+
+ocv_lock_firewall() {
+    local lock_dir=/run/oneclickvirt-firewall-locks lock_file
+    command -v flock >/dev/null 2>&1 || return 1
+    [ ! -L "$lock_dir" ] || return 1
+    mkdir -p -m 700 -- "$lock_dir" || return 1
+    [ "$(stat -c %u "$lock_dir")" = "$EUID" ] || return 1
+    [ "$(stat -c %a "$lock_dir")" = 700 ] || return 1
+    lock_file="$lock_dir/firewall.lock"
+    [ ! -L "$lock_file" ] || return 1
+    exec {ocv_firewall_lock_fd}>>"$lock_file" || return 1
+    # Keep the inode: unlinking it would let another process bypass this lock.
+    flock -xw 120 "$ocv_firewall_lock_fd" || return 1
+}
+
+ocv_with_firewall_lock() {
+    # The subshell releases the lock on both success and failure.
+    ( ocv_lock_firewall && "$@" )
+}
+
+sync_incus_firewalld_masquerade() {
+    local subnet="${1:-}" prefix octet active=false state_status=127
+    local permanent_rules="" runtime_rules="" scope rules rule source present
+    local cli=firewall-cmd
+    local octets=() options=() scopes=(permanent)
+    local pattern="^0 -s ([0-9./]+) ['\"]?!['\"]? -o incusbr0 -m comment --comment ['\"]?oneclickvirt-incus-ipv4['\"]? -j MASQUERADE$"
+    # Validate before changing either scope, preserving working rules on bad
+    # runtime metadata. An empty subnet means remove only this installer's NAT.
+    if [ -n "$subnet" ]; then
+        [[ "$subnet" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || return 1
+        prefix="${subnet##*/}"
+        ((10#$prefix >= 1 && 10#$prefix <= 32)) || return 1
+        IFS=. read -r -a octets <<<"${subnet%/*}"
+        for octet in "${octets[@]}"; do ((10#$octet <= 255)) || return 1; done
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        state_status=0
+        firewall-cmd --state >/dev/null 2>&1 || state_status=$?
+        # Only NOT_RUNNING permits offline mutation. A D-Bus failure is not
+        # evidence that the daemon stopped; do not overwrite its configuration.
+        if [ "$state_status" -ne 0 ] && [ "$state_status" -ne 252 ]; then
+            # No saved direct configuration means there is nothing for a
+            # stopped/unavailable daemon to restore; kernel cleanup follows.
+            [ -z "$subnet" ] && [ ! -e /etc/firewalld/direct.xml ] && return 0
+            return 1
+        fi
+    fi
+    if [ "$state_status" -eq 0 ]; then
+        active=true
+        permanent_rules=$(firewall-cmd --permanent --direct --get-rules ipv4 nat POSTROUTING) || return 1
+        runtime_rules=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING) || return 1
+        scopes+=(runtime)
+    else
+        [ -z "$subnet" ] || return 1
+        # Retire saved rules through the offline API when the daemon is down,
+        # so its next start cannot restore stale NAT. Never edit firewalld XML.
+        [ -f /etc/firewalld/direct.xml ] || return 0
+        local saved_status=0
+        grep -Fq 'oneclickvirt-incus-ipv4' /etc/firewalld/direct.xml || saved_status=$?
+        [ "$saved_status" -ne 1 ] || return 0
+        [ "$saved_status" -eq 0 ] || return 1
+        [ "$state_status" -eq 252 ] || return 1
+        command -v firewall-offline-cmd >/dev/null 2>&1 || return 1
+        cli=firewall-offline-cmd
+        permanent_rules=$("$cli" --direct --get-rules ipv4 nat POSTROUTING) || return 1
+    fi
+    for scope in "${scopes[@]}"; do
+        options=()
+        rules="$permanent_rules"
+        if [ "$scope" = runtime ]; then
+            rules="$runtime_rules"
+        elif [ "$active" = true ]; then
+            options=(--permanent)
+        fi
+        present=false
+        while IFS= read -r rule; do
+            if [[ "$rule" =~ $pattern ]] && [ "${BASH_REMATCH[1]}" = "$subnet" ]; then present=true; fi
+        done <<<"$rules"
+        if [ -n "$subnet" ] && [ "$present" = false ]; then
+            "$cli" "${options[@]}" --direct --add-rule ipv4 nat POSTROUTING 0 \
+                -s "$subnet" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+        fi
+        # Add the replacement before retiring the old subnet. Rebuild
+        # arguments from a strict match; never evaluate firewall output.
+        while IFS= read -r rule; do
+            if [[ "$rule" =~ $pattern ]]; then
+                source="${BASH_REMATCH[1]}"
+                if [ -z "$subnet" ] || [ "$source" != "$subnet" ]; then
+                    "$cli" "${options[@]}" --direct --remove-rule ipv4 nat POSTROUTING 0 \
+                        -s "$source" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+                fi
+            fi
+        done <<<"$rules"
+    done
+}
+
+remove_incus_iptables_masquerade() {
+    local rules rule source backend="${1:-iptables}"
+    local pattern='^-A POSTROUTING -s ([0-9./]+) ! -o incusbr0 -m comment --comment "?oneclickvirt-incus-ipv4"? -j MASQUERADE$'
+    rules=$("$backend" -w -t nat -S POSTROUTING) || return 1
+    while IFS= read -r rule; do
+        if [[ "$rule" =~ $pattern ]]; then
+            source="${BASH_REMATCH[1]}"
+            "$backend" -w -t nat -D POSTROUTING -s "$source" ! -o incusbr0 -m comment --comment oneclickvirt-incus-ipv4 -j MASQUERADE || return 1
+        fi
+    done <<<"$rules"
+}
+
+remove_incus_iptables_persistence() {
+    local config_file="${1:-/etc/iptables/rules.v4}" temporary
+    [ -f "$config_file" ] || return 0
+    if [ -L "$config_file" ]; then
+        config_file=$(readlink -f -- "$config_file") || return 1
+    fi
+    temporary=$(mktemp "${config_file}.XXXXXX") || return 1
+    # Preserve the saved policy; runtime snapshots may differ from it.
+    if ! cp -p -- "$config_file" "$temporary" || ! awk -v remove_forward="${2:-false}" '
+        /^-A POSTROUTING -s [0-9.]+\/[0-9]+ ! -o incusbr0 -m comment --comment "?oneclickvirt-incus-ipv4"? -j MASQUERADE$/ { next }
+        remove_forward=="true" && /^-A FORWARD -[io] incusbr0 -j ACCEPT$/ { next }
+        { print }
+    ' "$config_file" >"$temporary" || ! mv -f -- "$temporary" "$config_file"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+retire_incus_iptables_masquerade() {
+    local backend config_file version
+    for backend in iptables-nft iptables-legacy iptables; do
+        command -v "$backend" >/dev/null 2>&1 || continue
+        version=$("$backend" --version) || return 1
+        # An unloaded legacy NAT table contains no rules to retire. Avoid
+        # requiring the legacy kernel modules on a host that only uses nft.
+        if [[ "$version" == *legacy* ]]; then
+            [ -e /proc/net/ip_tables_names ] || continue
+            [ -r /proc/net/ip_tables_names ] || return 1
+            grep -Fxq nat /proc/net/ip_tables_names || continue
+        fi
+        remove_incus_iptables_masquerade "$backend" || return 1
+    done
+    if [ "$#" -eq 0 ]; then
+        set -- /etc/iptables/rules.v4 /etc/sysconfig/iptables /etc/iptables/iptables.rules /etc/iptables/rules-save
+    fi
+    for config_file in "$@"; do
+        remove_incus_iptables_persistence "$config_file" || return 1
+    done
+}
+
 remove_incus_nftables_config() {
-    local config_file="/etc/nftables.conf"
+    local config_file="${1:-/etc/nftables.conf}"
     local tmp_file
     [ -f "$config_file" ] || return 0
-    grep -Eq '^[[:space:]]*table[[:space:]]+(inet[[:space:]]+incus_(masq|block)|ip6[[:space:]]+incus_ipv6_nat)[[:space:]]*\{' "$config_file" || return 0
-    tmp_file="$(mktemp)"
-    awk '
+    tmp_file="$(mktemp)" || return 1
+    if ! awk '
+        /^[[:space:]]*include[[:space:]]+"\/etc\/nftables\.d\/oneclickvirt-incus\.nft"[[:space:]]*;?[[:space:]]*(#.*)?$/ { next }
         /^[[:space:]]*table[[:space:]]+(inet[[:space:]]+incus_(masq|block)|ip6[[:space:]]+incus_ipv6_nat)[[:space:]]*\{/ {
             skip = 1
             depth = 0
@@ -328,16 +570,11 @@ remove_incus_nftables_config() {
             next
         }
         { print }
-    ' "$config_file" > "$tmp_file" && cat "$tmp_file" > "$config_file"
-    rm -f "$tmp_file"
-}
-
-delete_iptables_drop_rule() {
-    local iface="$1"
-    local port="$2"
-    [ -n "$iface" ] || return 0
-    iptables -D FORWARD -o "$iface" -p tcp --dport "$port" -j DROP 2>/dev/null || true
-    iptables -D FORWARD -o "$iface" -p udp --dport "$port" -j DROP 2>/dev/null || true
+    ' "$config_file" > "$tmp_file" || ! cat "$tmp_file" > "$config_file"; then
+        rm -f -- "$tmp_file"
+        return 1
+    fi
+    rm -f -- "$tmp_file"
 }
 
 # ==============================
@@ -345,32 +582,31 @@ delete_iptables_drop_rule() {
 # Clean up nftables / iptables rules
 # ==============================
 _green "[9/9] 清理防火墙规则 / Cleaning up firewall rules..."
+ocv_lock_firewall || exit 1
+sync_incus_firewalld_masquerade || exit 1
+remove_incus_firewalld_bridge || exit 1
+for nft_config_file in /etc/nftables.conf /etc/sysconfig/nftables.conf /etc/nftables.nft; do
+    remove_incus_nftables_config "$nft_config_file" || exit 1
+done
+rm -f -- /etc/nftables.d/oneclickvirt-incus.nft || exit 1
 if command -v nft >/dev/null 2>&1; then
     nft delete table inet incus_masq 2>/dev/null || true
     nft delete table inet incus_block 2>/dev/null || true
     nft delete table ip6 incus_ipv6_nat 2>/dev/null || true
-    remove_incus_nftables_config
+    nft delete table inet incus 2>/dev/null || true
 fi
+retire_incus_iptables_masquerade || exit 1
+for policy_file in /etc/iptables/rules.v4 /etc/iptables/rules.v6 /etc/sysconfig/iptables /etc/sysconfig/ip6tables /etc/iptables/iptables.rules /etc/iptables/ip6tables.rules; do
+    remove_incus_iptables_persistence "$policy_file" true || exit 1
+done
 if command -v iptables >/dev/null 2>&1; then
-    default_iface="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
-    # 清理 NAT MASQUERADE
-    iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
     # 清理 incusbr0 相关 FORWARD 规则
     iptables -D FORWARD -i incusbr0 -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -o incusbr0 -j ACCEPT 2>/dev/null || true
-    # 清理端口屏蔽规则
-    for port in 3389 8888 54321 65432; do
-        delete_iptables_drop_rule "$default_iface" "$port"
-        if [ "$default_iface" != "eth0" ]; then
-            delete_iptables_drop_rule "eth0" "$port"
-        fi
-    done
-    # 保存规则
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save 2>/dev/null || true
-    elif command -v iptables-save >/dev/null 2>&1; then
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    fi
+    # Legacy untagged host-wide MASQUERADE and port DROP rules may belong to
+    # another runtime or the administrator. There is no safe ownership test;
+    # preserve them instead of disconnecting unrelated networks on uninstall.
+    # Do not replace the administrator's saved policy with a live snapshot.
 fi
 if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -D FORWARD -i incusbr0 -j ACCEPT 2>/dev/null || true

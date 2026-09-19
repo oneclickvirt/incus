@@ -230,6 +230,22 @@ install_package() {
     return 0
 }
 
+# Managed bridge initialization invokes the host dnsmasq binary.  A minimal
+# Debian/Ubuntu install may have Incus but only the package's optional
+# recommendation is absent, so fail early with an explicit dependency repair.
+install_dnsmasq() {
+    command -v dnsmasq >/dev/null 2>&1 && return 0
+    local package_name=dnsmasq
+    if command -v apt-get >/dev/null 2>&1; then
+        package_name=dnsmasq-base
+    fi
+    install_package "$package_name" || return 1
+    command -v dnsmasq >/dev/null 2>&1 || {
+        _red "dnsmasq was installed but the executable is unavailable"
+        return 1
+    }
+}
+
 # Other vendor sysctl files can contain unsupported optional keys. Validate
 # the forwarding file we own and the effective value before declaring ready.
 apply_forwarding_config() {
@@ -291,6 +307,19 @@ prepare_package_manager() {
 # init` has ever completed: package installation can leave an empty server
 # with no storage pool or default profile.  Initialize only when the pool list
 # is empty, and preserve any existing pools and profiles.
+# JSON inventories work on LTS clients whose storage/network list has no -c.
+# Capture the command first so a daemon failure cannot become an empty list.
+runtime_resource_names() {
+    local data
+    data=$(incus "$1" list --format json) || return 1
+    jq -sr '
+        if length != 1 or (.[0] | type) != "array" then error("invalid runtime inventory")
+        else .[0] end |
+        if all(.[]; type == "object" and (.name | type) == "string" and (.name | length) > 0)
+        then .[].name else error("invalid resource name") end
+    ' <<<"$data"
+}
+
 ensure_runtime_storage() {
     local pools init_output init_status
     command -v incus >/dev/null 2>&1 || {
@@ -301,7 +330,7 @@ ensure_runtime_storage() {
         _red "Incus daemon is not ready"
         return 1
     }
-    pools=$(incus storage list --format csv -c n 2>/dev/null) || {
+    pools=$(runtime_resource_names storage 2>/dev/null) || {
         init_output=$(incus admin init --auto 2>&1)
         init_status=$?
         if [ "$init_status" -ne 0 ] && ! grep -Eiq 'already[[:space:]]+(been[[:space:]]+)?initialized|already[[:space:]]+exists|already[[:space:]]+configured' <<<"$init_output"; then
@@ -309,7 +338,7 @@ ensure_runtime_storage() {
             _red "Incus storage initialization failed"
             return 1
         fi
-        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+        pools=$(runtime_resource_names storage 2>/dev/null) || return 1
     }
     if [ -z "$pools" ]; then
         init_output=$(incus admin init --auto 2>&1)
@@ -319,14 +348,14 @@ ensure_runtime_storage() {
             _red "Incus storage initialization failed"
             return 1
         fi
-        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+        pools=$(runtime_resource_names storage 2>/dev/null) || return 1
     fi
     if [ -z "$pools" ]; then
         # Some distro packages mark the daemon initialized while leaving the
         # storage configuration empty.  A plain dir pool is the least
         # surprising recovery and keeps container creation usable.
         incus storage create default dir >/dev/null 2>&1 || return 1
-        pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+        pools=$(runtime_resource_names storage 2>/dev/null) || return 1
     fi
     [ -n "$pools" ] || {
         _red "Incus has no usable storage pool after initialization"
@@ -339,7 +368,7 @@ ensure_runtime_storage() {
 
 select_storage_pool_for_profile() {
     local pools selected
-    pools=$(incus storage list --format csv -c n 2>/dev/null) || return 1
+    pools=$(runtime_resource_names storage 2>/dev/null) || return 1
     if grep -Fxq default <<<"$pools"; then
         selected=default
     else
@@ -355,7 +384,7 @@ select_storage_pool_for_profile() {
 
 ensure_default_bridge() {
     local bridge=incusbr0 networks
-    networks=$(incus network list --format csv -c n 2>/dev/null) || return 1
+    networks=$(runtime_resource_names network 2>/dev/null) || return 1
     if ! grep -Fxq "$bridge" <<<"$networks"; then
         if ip link show dev "$bridge" >/dev/null 2>&1; then
             _red "$bridge 已被宿主机外部设备占用，拒绝替换"
@@ -364,6 +393,30 @@ ensure_default_bridge() {
         incus network create "$bridge" ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none || return 1
         incus network set "$bridge" ipv6.address auto || _yellow "IPv6 setup unavailable; retaining IPv4-only mode"
     fi
+}
+
+api_metadata() {
+    # Slurp first: jq 1.6 can exit successfully on empty input even with -e.
+    # Exactly one object is required before any default-setting mutation.
+    jq -cs --arg resource "${1:-object}" '
+        if length != 1 or (.[0] | type) != "object"
+        then error("expected one API object") else .[0] end |
+        if has("metadata") then
+            if .type == "sync" and (.metadata | type) == "object"
+               and ((has("status_code") | not) or .status_code == 200)
+            then .metadata else error("invalid API envelope") end
+        elif .type == "error" or .type == "async" or .type == "sync"
+        then error("invalid API response") else . end |
+        if $resource == "profile" then
+            if (.devices | type) == "object"
+               and all(.devices[]; type == "object" and all(.[]; type == "string"))
+            then . else error("invalid profile devices") end
+        elif $resource == "network" then
+            if .type == "bridge" and .managed == true
+               and (.config | type) == "object" and all(.config[]; type == "string")
+            then . else error("invalid managed bridge configuration") end
+        else . end
+    '
 }
 
 ensure_default_profile_devices() {
@@ -375,7 +428,7 @@ ensure_default_profile_devices() {
     # Do not turn a failed/empty query into an empty, apparently valid
     # profile: jq alone can succeed when the command before the pipe fails.
     profile=$(incus query /1.0/profiles/default) || return 1
-    profile=$(jq -ce 'if (.metadata? | type) == "object" then .metadata else . end | select(type == "object" and (.devices | type) == "object")' <<<"$profile") || return 1
+    profile=$(api_metadata profile <<<"$profile") || return 1
     roots=$(jq -er '[.devices // {} | to_entries[] | select(.value.type == "disk" and .value.path == "/")] | length' <<<"$profile") || return 1
     if [ "$roots" -eq 0 ]; then
         jq -e '.devices.root != null' <<<"$profile" >/dev/null && {
@@ -423,7 +476,7 @@ verify_runtime_network() {
     command -v jq >/dev/null 2>&1 || { _red "jq is required to verify Incus"; return 1; }
     incus info >/dev/null 2>&1 || { _red "Incus daemon is unavailable"; return 1; }
     network=$(incus query /1.0/networks/incusbr0 2>/dev/null) || { _red "incusbr0 is missing"; return 1; }
-    network=$(printf '%s\n' "$network" | jq -c 'if (.metadata? | type) == "object" then .metadata else . end') || return 1
+    network=$(api_metadata network <<<"$network") || return 1
     jq -e '.type == "bridge" and .managed == true' <<<"$network" >/dev/null || { _red "incusbr0 is not a managed bridge"; return 1; }
     ipv4=$(jq -r '.config["ipv4.address"] // empty' <<<"$network") || return 1
     dhcp=$(jq -r '.config["ipv4.dhcp"] // empty' <<<"$network") || return 1
@@ -432,7 +485,7 @@ verify_runtime_network() {
         return 1
     }
     profile=$(incus query /1.0/profiles/default 2>/dev/null) || { _red "default profile is missing"; return 1; }
-    profile=$(printf '%s\n' "$profile" | jq -c 'if (.metadata? | type) == "object" then .metadata else . end') || return 1
+    profile=$(api_metadata profile <<<"$profile") || return 1
     pool=$(jq -r '[.devices[]? | select(.type == "disk" and .path == "/") | .pool // empty] | if length == 1 then .[0] else empty end' <<<"$profile") || return 1
     [ -n "$pool" ] && incus storage show "$pool" >/dev/null 2>&1 || { _red "default profile has no usable root storage pool"; return 1; }
     local link_attempt=0
@@ -450,7 +503,7 @@ configure_default_network_settings() {
     local config ipv4 ipv6 dns_mode raw_dnsmasq dhcp nat
     ensure_default_bridge || return 1
     config=$(incus query /1.0/networks/incusbr0) || return 1
-    config=$(jq -ce 'if (.metadata? | type) == "object" then .metadata else . end | select(.type == "bridge" and .managed == true and (.config | type) == "object")' <<<"$config") || return 1
+    config=$(api_metadata network <<<"$config") || return 1
     ipv4=$(jq -r '.config["ipv4.address"] // empty' <<<"$config") || return 1
     if [ -z "$ipv4" ]; then
         incus network set incusbr0 ipv4.address auto || return 1
@@ -480,10 +533,38 @@ configure_default_network_settings() {
     dns_mode=$(jq -r '.config["dns.mode"] // empty' <<<"$config") || return 1
     if [ -z "$dns_mode" ]; then
         incus network set incusbr0 dns.mode managed || return 1
-        raw_dnsmasq=$(jq -r '.config["raw.dnsmasq"] // empty' <<<"$config") || return 1
-        if [ -z "$raw_dnsmasq" ]; then
-            incus network set incusbr0 raw.dnsmasq dhcp-option=6,8.8.8.8,8.8.4.4 || return 1
-        fi
+    fi
+    # dns.mode may already be managed on a partially initialized host; still
+    # ensure dnsmasq has reachable upstreams while preserving custom rules.
+    raw_dnsmasq=$(jq -r '.config["raw.dnsmasq"] // empty' <<<"$config") || return 1
+    if [ -z "$raw_dnsmasq" ]; then
+        incus network set incusbr0 raw.dnsmasq $'server=1.1.1.1\nserver=8.8.8.8' || return 1
+    fi
+}
+
+# Incus host-address proxy mappings require Linux bridge netfilter. The
+# daemon only logs a warning when this is absent, leaving published SSH ports
+# unreachable, so panel initialization must make the prerequisite explicit.
+ensure_bridge_netfilter() {
+    local module_file=/etc/modules-load.d/oneclickvirt-bridge-netfilter.conf
+    if [ ! -d /proc/sys/net/bridge ]; then
+        command -v modprobe >/dev/null 2>&1 || return 1
+        modprobe br_netfilter || return 1
+    fi
+    [ -d /proc/sys/net/bridge ] || return 1
+    command -v sysctl >/dev/null 2>&1 || return 1
+    sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null || return 1
+    sysctl -w net.bridge.bridge-nf-call-ip6tables=1 >/dev/null || return 1
+    mkdir -p /etc/modules-load.d /etc/sysctl.d || return 1
+    if [ ! -f "$module_file" ] || ! grep -Fxq br_netfilter "$module_file"; then
+        printf '%s\n' br_netfilter >"$module_file" || return 1
+    fi
+    local sysctl_file=/etc/sysctl.d/99-oneclickvirt-bridge.conf
+    if [ ! -f "$sysctl_file" ] || ! grep -Eq '^net\.bridge\.bridge-nf-call-iptables=1$' "$sysctl_file"; then
+        printf '%s\n' 'net.bridge.bridge-nf-call-iptables=1' >>"$sysctl_file" || return 1
+    fi
+    if ! grep -Eq '^net\.bridge\.bridge-nf-call-ip6tables=1$' "$sysctl_file"; then
+        printf '%s\n' 'net.bridge.bridge-nf-call-ip6tables=1' >>"$sysctl_file" || return 1
     fi
 }
 
@@ -494,6 +575,7 @@ fi
 for package_name in jq dos2unix curl; do
     install_package "$package_name" || exit 1
 done
+install_dnsmasq || exit 1
 install_uidmap || exit 1
 
 ensure_runtime_storage || exit 1
@@ -502,6 +584,7 @@ ensure_runtime_storage || exit 1
 configure_default_network_settings || exit 1
 ensure_default_profile_devices || exit 1
 verify_runtime_network || exit 1
+ensure_bridge_netfilter || { _red "br_netfilter is required for Incus proxy port mappings"; exit 1; }
 
 check_cdn() {
     local o_url=$1

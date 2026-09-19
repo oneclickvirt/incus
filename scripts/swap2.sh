@@ -10,11 +10,10 @@ Font="\033[0m"
 Red="\033[31m"
 
 is_noninteractive() {
-    case "${noninteractive:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
-    esac
-    case "${INCUS_NONINTERACTIVE:-}" in
-        true|TRUE|True|1|yes|YES|Yes|y|Y) return 0 ;;
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-${INCUS_NONINTERACTIVE:-}}}"
+    export noninteractive
+    case "$noninteractive" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
     esac
     return 1
 }

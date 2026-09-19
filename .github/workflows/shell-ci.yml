@@ -13,6 +13,38 @@ env:
   noninteractive: "true"
 
 jobs:
+  debian-json-compat:
+    name: Debian 12 jq 1.6 initialization boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Retain initialization scenarios on the oldest supported jq
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work debian:12 bash -c '
+            set -euo pipefail
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends jq
+            jq --version
+            bash tests/runtime_inventory_test.sh
+            bash tests/storage_driver_refresh_test.sh
+            bash tests/initialization_test.sh
+            bash tests/panel_initialization_test.sh
+          '
+
+  masquerade-kernel:
+    name: Real IPv4 and IPv6 NAT isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install network test dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends nftables iptables iproute2 python3 procps util-linux firewalld dbus
+      - name: Test packets and uninstall ownership in isolated namespaces
+        run: sudo env OCV_TEST_FIREWALLD=true bash tests/masquerade_kernel_test.sh
+
   bash-syntax:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -37,15 +69,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends jq util-linux
           bash tests/image_lookup_test.sh
           bash tests/build_ipv6_network_test.sh
           bash tests/build_failure_control_flow_test.sh
+          bash tests/retry_curl_sete_test.sh
           bash tests/storage_pool_preservation_test.sh
+          bash tests/storage_module_test.sh
+          bash tests/storage_driver_refresh_test.sh
+          bash tests/runtime_inventory_test.sh
           bash tests/initialization_test.sh
+          bash tests/noninteractive_mode_test.sh
+          bash tests/uninstall_packages_test.sh
           bash tests/panel_initialization_test.sh
           bash tests/platform_dependencies_test.sh
           bash tests/host_configuration_preservation_test.sh
           bash tests/batch_transaction_test.sh
+          bash tests/instance_ownership_test.sh
+          bash tests/masquerade_failure_test.sh
+          bash tests/firewall_persistence_test.sh
+          bash tests/firewalld_failure_test.sh
+          timeout 20 bash tests/firewall_lock_test.sh
+          timeout 20 bash tests/script_lock_test.sh
 
       - name: Check shell lint errors
         shell: bash

@@ -91,23 +91,26 @@ apt install wget sudo curl -y
 # vnstat -v
 # vnstatd -v
 # ! vnstati -v && echo "vnstat 编译安装无vnstati工具，如需使用请使用命令 apt install vnstati -y 覆盖安装apt源版本"
-apt install make -y
-apt install gcc -y
-apt install libc6-dev -y
-apt install libsqlite3-0 -y
-apt install libsqlite3-dev -y
-apt install libgd3 -y
-apt install libgd-dev -y
+apt install make gcc libc6-dev libsqlite3-0 libsqlite3-dev libgd3 libgd-dev -y || exit 1
 cd /usr/src || exit 1
-wget https://humdi.net/vnstat/vnstat-2.11.tar.gz
-chmod 755 vnstat-2.11.tar.gz
-tar zxvf vnstat-2.11.tar.gz
+vnstat_archive_tmp=$(mktemp /usr/src/vnstat-2.11.tar.gz.tmp.XXXXXX) || exit 1
+if ! wget -q https://humdi.net/vnstat/vnstat-2.11.tar.gz -O "$vnstat_archive_tmp" || [ ! -s "$vnstat_archive_tmp" ]; then
+    rm -f -- "$vnstat_archive_tmp"
+    echo "Failed to download vnStat source archive" >&2
+    exit 1
+fi
+mv -f -- "$vnstat_archive_tmp" /usr/src/vnstat-2.11.tar.gz || {
+    rm -f -- "$vnstat_archive_tmp"
+    exit 1
+}
+chmod 755 /usr/src/vnstat-2.11.tar.gz
+tar zxvf vnstat-2.11.tar.gz || exit 1
 cd vnstat-2.11 || exit 1
-./configure --prefix=/usr --sysconfdir=/etc && make && make install
-cp -v examples/systemd/vnstat.service /etc/systemd/system/
-service_manager enable vnstat
-service_manager start vnstat
-pgrep -c vnstatd
-vnstat -v
+./configure --prefix=/usr --sysconfdir=/etc && make && make install || exit 1
+cp -v examples/systemd/vnstat.service /etc/systemd/system/ || exit 1
+service_manager enable vnstat || { echo "Failed to enable vnStat service." >&2; exit 1; }
+service_manager start vnstat || { echo "Failed to start vnStat service." >&2; exit 1; }
+pgrep -c vnstatd >/dev/null || { echo "vnStat daemon is not running." >&2; exit 1; }
+vnstat -v || exit 1
 vnstatd -v
 vnstati -v
