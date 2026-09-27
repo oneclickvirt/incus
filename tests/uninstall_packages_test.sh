@@ -16,13 +16,14 @@ dpkg-query() {
     return "$query_status"
 }
 apt-get() { calls+=("$*"); return "$remove_status"; }
+apt_with_lock_timeout() { calls+=("lock:$*"); return "$remove_status"; }
 uninstall_incus_debian_packages || fail 'Debian package selection failed'
-[ "${calls[*]}" = 'remove --purge -y incus incus-base incus-client incus-agent' ] || fail 'missing optional or unrelated package included'
+[ "${calls[*]}" = 'lock:remove --purge -y incus incus-base incus-client incus-agent' ] || fail 'missing optional or unrelated package included'
 
 mock_package_listing=$'incus:amd64\tinstalled\nincus-ui-canonical\tconfig-files\nincus-extra\tunpacked\nincus-base\thalf-configured'
 calls=()
 uninstall_incus_debian_packages || fail 'partial install / config leftovers failed'
-[ "${calls[*]}" = 'remove --purge -y incus:amd64 incus-ui-canonical incus-extra incus-base' ] || fail 'recoverable package states omitted'
+[ "${calls[*]}" = 'lock:remove --purge -y incus:amd64 incus-ui-canonical incus-extra incus-base' ] || fail 'recoverable package states omitted'
 
 mock_package_listing=$'incus\tnot-installed\nother-incus-helper\tinstalled'
 calls=()

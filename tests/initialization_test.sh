@@ -211,3 +211,7 @@ grep -Fq 'incus network set incusbr0 ipv4.dhcp true || return 1' "$panel_init" |
 grep -Fq 'install_uidmap()' "$panel_init" ||
     fail 'Incus panel init must map uidmap package names per distribution'
 printf 'Incus initialization fault-injection tests passed (10 scenarios)\n'
+grep -Fq '"ca-certificates"' "$repo_root/scripts/ssh_bash.sh" ||
+    fail 'Incus bash guest bootstrap must install TLS root certificates'
+grep -Fq 'ca-certificates' "$repo_root/scripts/ssh_sh.sh" ||
+    fail 'Incus Alpine guest bootstrap must install TLS root certificates'

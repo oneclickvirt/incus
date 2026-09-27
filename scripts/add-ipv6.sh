@@ -28,6 +28,55 @@ get_saved_interface() {
     printf '%s\n' "$saved"
 }
 
+# iproute2 JSON field names do not change with the host's display language.
+# Some wrappers still add terminal color even when JSON was requested.
+restore_ipv6_json_rows() {
+    local mode="$1" target="${2:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$mode" "$target" <<'PY'
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+
+mode, target = sys.argv[1:]
+if mode == "default":
+    args = ["-6", "route", "show", "default"]
+elif mode == "addresses":
+    args = ["-6", "addr", "show"]
+    if target:
+        args += ["dev", target]
+else:
+    raise SystemExit(1)
+try:
+    env = dict(os.environ, LC_ALL="C", NO_COLOR="1")
+    raw = subprocess.check_output(["ip", "-j", *args], env=env,
+                                  stderr=subprocess.DEVNULL)
+    data = json.loads(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", raw))
+    if not isinstance(data, list):
+        raise ValueError("invalid ip JSON")
+    if mode == "default":
+        for route in data:
+            if route.get("dst", "default") == "default" and route.get("dev"):
+                print(route["dev"])
+    else:
+        for interface in data:
+            name = interface.get("ifname", "")
+            for item in interface.get("addr_info", []):
+                if item.get("family") != "inet6" or item.get("scope") != "global" or item.get("tentative") or "tentative" in item.get("flags", []):
+                    continue
+                address = ipaddress.IPv6Address(item["local"])
+                prefix = int(item["prefixlen"])
+                ipaddress.IPv6Interface(f"{address}/{prefix}")
+                if address in ipaddress.IPv6Network("2000::/3") and address.is_global:
+                    print(name, address.compressed, prefix, sep="\t")
+except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+PY
+}
+
 # Prefer the interface recorded by the mapping creator, then the IPv6 default
 # route. This is required for tunnel and routed-bridge hosts; lshw alone often
 # returns the underlying physical NIC instead.
@@ -37,21 +86,24 @@ get_interface() {
         printf '%s\n' "$iface"
         return 0
     fi
-    iface=$(ip -6 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+    iface=$(restore_ipv6_json_rows default 2>/dev/null | head -1)
     if valid_interface_name "$iface" && ip link show dev "$iface" >/dev/null 2>&1; then
         printf '%s\n' "$iface"
         return 0
     fi
-    if command -v lshw >/dev/null 2>&1; then
-        iface=$(lshw -C network 2>/dev/null | awk '/logical name:/{print $3}' | head -1)
-        valid_interface_name "$iface" && { printf '%s\n' "$iface"; return 0; }
+    iface=$(restore_ipv6_json_rows addresses 2>/dev/null | awk -F '\t' 'NF == 3 {print $1; exit}')
+    if valid_interface_name "$iface" && ip link show dev "$iface" >/dev/null 2>&1; then
+        printf '%s\n' "$iface"
+        return 0
     fi
     for iface_path in /sys/class/net/*; do
         [ -e "$iface_path" ] || continue
         candidate=$(basename "$iface_path")
         [ -e "/sys/devices/virtual/net/$candidate" ] && continue
-        printf '%s\n' "$candidate"
-        return 0
+        if valid_interface_name "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     done
     return 1
 }
@@ -63,7 +115,7 @@ get_host_ipv6_prefixlen() {
         printf '%s\n' "$plen"
         return 0
     fi
-    plen=$(ip -6 addr show dev "$iface" 2>/dev/null | awk '/inet6.*scope global/ && $2 !~ / tentative/ {print $2}' | head -1 | cut -d/ -f2)
+    plen=$(restore_ipv6_json_rows addresses "$iface" 2>/dev/null | awk -F '\t' 'NF == 3 {print $3; exit}')
     [[ "$plen" =~ ^[0-9]+$ ]] && [ "$plen" -ge 1 ] && [ "$plen" -le 128 ] || return 1
     printf '%s\n' "$plen"
 }
@@ -81,11 +133,28 @@ raise SystemExit(0 if address in ipaddress.IPv6Network("2000::/3") and address.i
 PY
 }
 
+normalize_restorable_global_ipv6() {
+    python3 - "${1:-}" <<'PY'
+import ipaddress
+import sys
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if address not in ipaddress.IPv6Network("2000::/3") or not address.is_global:
+    raise SystemExit(1)
+print(address.compressed)
+PY
+}
+
 restore_address() {
-    local address="$1" interface="$2" prefix_len="$3"
-    is_restorable_global_ipv6 "$address" || return 0
-    if ! ip -6 addr show dev "$interface" 2>/dev/null | grep -Fqw "$address"; then
-        ip -6 addr replace "$address/$prefix_len" dev "$interface" 2>/dev/null || return 1
+    local address="$1" interface="$2" prefix_len="$3" rows
+    [[ "$prefix_len" =~ ^[0-9]+$ ]] && [ "$prefix_len" -ge 1 ] && [ "$prefix_len" -le 128 ] || return 1
+    address=$(normalize_restorable_global_ipv6 "$address" 2>/dev/null) || return 0
+    rows=$(restore_ipv6_json_rows addresses "$interface") || return 1
+    if ! printf '%s\n' "$rows" | awk -F '\t' -v addr="$address" '$2 == addr {found=1} END {exit !found}'; then
+        # A mapped address is a host alias, not another connected prefix.
+        ip -6 addr replace "$address/128" dev "$interface" 2>/dev/null || return 1
     fi
 }
 

@@ -33,6 +33,22 @@ is_noninteractive() {
     return 1
 }
 
+# Debian hosts may run unattended-upgrades immediately after a fresh install.
+# Let apt coordinate with that transaction instead of failing after the
+# runtime data has already been removed. The timeout is bounded and validated
+# so a malformed environment value cannot turn an uninstall into an unbounded
+# wait. apt's lock timeout covers both dpkg and the frontend lock.
+apt_with_lock_timeout() {
+    local timeout="${OCV_APT_LOCK_TIMEOUT:-600}"
+    case "$timeout" in
+        ''|*[!0-9]*)
+            _red "OCV_APT_LOCK_TIMEOUT 必须是非负整数 / must be a non-negative integer"
+            return 2
+            ;;
+    esac
+    apt-get -o "DPkg::Lock::Timeout=${timeout}" "$@"
+}
+
 # Package names differ between Debian and Zabbly. One unavailable optional
 # name makes apt reject the entire removal transaction, including installed
 # packages. Query once and remove only this runtime's present packages.
@@ -53,7 +69,7 @@ uninstall_incus_debian_packages() {
         esac
     done <<<"$listing"
     [ "${#packages[@]}" -gt 0 ] || return 0
-    apt-get remove --purge -y "${packages[@]}"
+    apt_with_lock_timeout remove --purge -y "${packages[@]}"
 }
 
 stop_uninstalled_lxcfs() {
@@ -69,6 +85,68 @@ stop_uninstalled_lxcfs() {
         return 1
     fi
     return 0
+}
+
+incus_other_runtime_uses_ipv6_cron() {
+    local inventory
+    command -v snap >/dev/null 2>&1 || return 1
+    # An unreadable snap inventory is not proof that LXD is absent. Preserve
+    # the shared keepalive entry rather than disconnecting another runtime.
+    inventory=$(snap list 2>/dev/null) || return 0
+    awk '$1 == "lxd" { found=1 } END { exit !found }' <<<"$inventory"
+}
+
+remove_incus_ipv6_cron() {
+    local cron_file="${OCV_IPV6_CRON_FILE:-/etc/cron.d/oneclickvirt-ipv6}"
+    local lock_file="${OCV_IPV6_CRON_LOCK:-/run/lock/oneclickvirt-ipv6.lock}"
+    local lock_dir tmp status=0
+    local expected="*/1 * * * * root curl --noproxy '*' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb && curl --noproxy '*' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb"
+
+    [ -e "$cron_file" ] || [ -L "$cron_file" ] || return 0
+    if incus_other_runtime_uses_ipv6_cron; then
+        _yellow "  检测到 LXD，保留共享 IPv6 定时任务 / LXD detected; preserving shared IPv6 cron."
+        return 0
+    fi
+    if [ -L "$cron_file" ] || [ ! -f "$cron_file" ]; then
+        _yellow "  IPv6 cron 不是普通文件，保留人工管理内容 / Preserving non-regular IPv6 cron path."
+        return 0
+    fi
+
+    (
+    lock_dir=${lock_file%/*}
+    [ "$lock_dir" != "$lock_file" ] || lock_dir=.
+    [ ! -L "$lock_dir" ] || return 1
+    mkdir -p -- "$lock_dir" || return 1
+    [ ! -L "$lock_file" ] || return 1
+    exec {incus_ipv6_cron_lock_fd}>>"$lock_file" || return 1
+    flock -xw 10 "$incus_ipv6_cron_lock_fd" || return 1
+
+    # Recheck after locking. Remove only the exact line installed by these
+    # repositories and preserve comments or administrator-owned cron entries.
+    if [ -L "$cron_file" ] || [ ! -f "$cron_file" ]; then
+        flock -u "$incus_ipv6_cron_lock_fd"
+        exec {incus_ipv6_cron_lock_fd}>&-
+        return 0
+    fi
+    tmp=$(mktemp "${cron_file}.tmp.XXXXXX") || return 1
+    cp -p -- "$cron_file" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    awk -v expected="$expected" '$0 == expected { removed=1; next } { print } END { exit removed ? 0 : 3 }' \
+        "$cron_file" >"$tmp" || status=$?
+    if [ "$status" -eq 0 ]; then
+        if [ -s "$tmp" ]; then
+            mv -f -- "$tmp" "$cron_file" || return 1
+        else
+            rm -f -- "$cron_file" "$tmp" || return 1
+        fi
+    elif [ "$status" -eq 3 ]; then
+        rm -f -- "$tmp" || return 1
+    else
+        rm -f -- "$tmp"
+        return "$status"
+    fi
+    flock -u "$incus_ipv6_cron_lock_fd"
+    exec {incus_ipv6_cron_lock_fd}>&-
+    )
 }
 
 # ==============================
@@ -255,11 +333,11 @@ if command -v apt >/dev/null 2>&1; then
         _red "Incus package removal failed; stopping before data-directory cleanup. Fix the package-manager error and retry."
         exit 1
     fi
-    apt-get autoremove -y 2>/dev/null || true
+    apt_with_lock_timeout autoremove -y 2>/dev/null || true
     # 清除 Zabbly 仓库配置
     rm -f /etc/apt/sources.list.d/zabbly-incus-stable.sources
     rm -f /etc/apt/keyrings/zabbly.gpg
-    apt-get update -y 2>/dev/null || true
+    apt_with_lock_timeout update -y 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1; then
     dnf remove -y incus incus-tools 2>/dev/null || true
 elif command -v yum >/dev/null 2>&1; then
@@ -331,6 +409,7 @@ LEFTOVER_FILES=(
 for f in "${LEFTOVER_FILES[@]}"; do
     [ -f "$f" ] && rm -f "$f" && _yellow "  已删除 / Removed: $f"
 done
+remove_incus_ipv6_cron || exit 1
 # 删除 incrc.local 中的 incus 相关条目
 if [ -f /etc/rc.local ]; then
     sed -i '/incus-lvm-restore\.sh/d' /etc/rc.local 2>/dev/null || true

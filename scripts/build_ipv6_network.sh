@@ -1,6 +1,7 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
 # 2026.08.30
+# oneclickvirt-ipv6-helper-version: 2026.09.20
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -207,6 +208,10 @@ generate_ipv6_candidates() {
     command -v python3 >/dev/null 2>&1 || return 1
     python3 - "$network" "$limit" <<'PY'
 import ipaddress
+import json
+import os
+import re
+import subprocess
 import sys
 
 try:
@@ -216,10 +221,58 @@ except (ValueError, IndexError):
     raise SystemExit(1)
 if network.version != 6 or limit < 1:
     raise SystemExit(1)
+env = dict(os.environ, LC_ALL="C", NO_COLOR="1")
+try:
+    addresses = json.loads(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", subprocess.check_output(
+        ["ip", "-j", "-6", "addr", "show"],
+        stderr=subprocess.DEVNULL, env=env)))
+    routes = json.loads(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", subprocess.check_output(
+        ["ip", "-j", "-6", "route", "show", "table", "all"],
+        stderr=subprocess.DEVNULL, env=env)))
+    if not isinstance(addresses, list) or not isinstance(routes, list):
+        raise ValueError("invalid ip JSON")
+except (OSError, subprocess.CalledProcessError, ValueError):
+    raise SystemExit(1)
+reserved = set()
+for interface in addresses:
+    for item in interface.get("addr_info", []):
+        if item.get("family") == "inet6":
+            reserved.add(ipaddress.IPv6Address(item["local"]))
+
+def route_values(route, key):
+    value = route.get(key)
+    if value:
+        yield value
+    for group in ("nexthops", "multipath"):
+        entries = route.get(group, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get(key):
+                yield entry[key]
+
+for route in routes:
+    for gateway in route_values(route, "gateway"):
+        try:
+            reserved.add(ipaddress.IPv6Address(gateway))
+        except (ValueError, TypeError):
+            continue
+    destination = route.get("dst") or "default"
+    if destination != "default":
+        try:
+            subnet = ipaddress.IPv6Network(destination, strict=False)
+        except (ValueError, TypeError):
+            # Some route kinds expose labels such as "local" or
+            # "multicast" in dst. They are not addresses to reserve.
+            continue
+        if subnet.prefixlen == 128:
+            reserved.add(subnet.network_address)
 start = 3 if network.num_addresses > 4 else 0
 count = min(limit, network.num_addresses - start)
 for offset in range(count):
-    print(ipaddress.ip_address(int(network.network_address) + start + offset).compressed)
+    candidate = ipaddress.IPv6Address(int(network.network_address) + start + offset)
+    if candidate not in reserved:
+        print(candidate.compressed)
 PY
 }
 
@@ -336,14 +389,109 @@ safe_grep() {
     fi
 }
 
+# Read iproute2 JSON so interface, prefix and route fields are independent of
+# terminal colors and the host's display language.
+host_ipv6_json_rows() {
+    local mode="$1" target="${2:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$mode" "$target" <<'PY'
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+
+mode, target = sys.argv[1:]
+args = {
+    "addresses": ["-6", "addr", "show"],
+    "default": ["-6", "route", "show", "default"],
+    "neighbors": ["-6", "neigh", "show", "dev", target],
+}.get(mode)
+if args is None:
+    raise SystemExit(1)
+try:
+    env = dict(os.environ, LC_ALL="C", NO_COLOR="1")
+    raw = subprocess.check_output(["ip", "-j", *args], env=env,
+                                  stderr=subprocess.DEVNULL)
+    data = json.loads(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", raw))
+    if not isinstance(data, list):
+        raise ValueError("invalid ip JSON")
+    if mode == "addresses":
+        for interface in data:
+            name = interface.get("ifname", "")
+            for item in interface.get("addr_info", []):
+                if item.get("family") != "inet6" or item.get("tentative") or "tentative" in item.get("flags", []):
+                    continue
+                cidr = f'{ipaddress.IPv6Address(item["local"]).compressed}/{item["prefixlen"]}'
+                ipaddress.IPv6Interface(cidr)
+                print(name, cidr, item.get("scope", ""), sep="\t")
+    elif mode == "default":
+        for route in data:
+            if (route.get("dst") or "default") != "default":
+                continue
+            if route.get("dev"):
+                print(route["dev"], route.get("gateway", ""), sep="\t")
+            for group in ("nexthops", "multipath"):
+                entries = route.get(group, [])
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("dev"):
+                        print(entry["dev"], entry.get("gateway", ""), sep="\t")
+    else:
+        for neighbor in data:
+            if neighbor.get("router") or "router" in neighbor.get("flags", []):
+                print(ipaddress.IPv6Address(neighbor["dst"]))
+except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+PY
+}
+
+# Pick the widest public IPv6 prefix while keeping the owning interface and
+# address together. A host can expose a /128 and a delegated /38 or /64 on
+# the same NIC; matching the preferred address alone would select the /128.
+select_ipv6_uplink_row() {
+    local preferred="${1:-}" requested="${2:-}" rows="${3:-}"
+    printf '%s\n' "$rows" | python3 -c '
+import ipaddress
+import sys
+
+preferred = sys.argv[1].strip()
+requested = sys.argv[2].strip()
+public = ipaddress.IPv6Network("2000::/3")
+candidates = []
+for raw in sys.stdin:
+    fields = raw.rstrip("\n").split("\t")
+    if len(fields) != 3 or fields[2] != "global":
+        continue
+    interface, cidr = fields[0], fields[1]
+    if requested and interface != requested:
+        continue
+    try:
+        address = ipaddress.IPv6Interface(cidr)
+    except ValueError:
+        continue
+    if address.version != 6 or address.ip not in public or not address.ip.is_global:
+        continue
+    preferred_rank = 0 if preferred and address.ip.compressed == preferred else 1
+    candidates.append((address.network.prefixlen, preferred_rank, interface, address.with_prefixlen))
+if not candidates:
+    raise SystemExit(1)
+candidates.sort()
+print(candidates[0][2], candidates[0][3], sep="\t")
+' "$preferred" "$requested"
+}
+
 detect_primary_ipv6_iface() {
     local iface iface_path
-    iface=$(ip -6 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+    iface=$(host_ipv6_json_rows default 2>/dev/null | awk -F '\t' 'NF {print $1; exit}')
     if [ -n "$iface" ]; then
         echo "$iface"
         return
     fi
-    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    iface=$(LC_ALL=C NO_COLOR=1 ip -j route show default 2>/dev/null |
+        python3 -c 'import json,re,sys; data=json.loads(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]",b"",sys.stdin.buffer.read())); print(next((r.get("dev", "") for r in data if r.get("dst", "default") == "default"), ""))' 2>/dev/null)
     if [ -n "$iface" ]; then
         echo "$iface"
         return
@@ -364,50 +512,18 @@ detect_primary_ipv6_iface() {
 # Do not assume that the first physical NIC is the IPv6 uplink: HE/6in4,
 # sit/vti/GRE and routed bridge deployments commonly terminate IPv6 elsewhere.
 ipv6_uplink_interface() {
-    local preferred="${1:-}" requested="${INCUS_IPV6_UPLINK:-}" iface fallback_iface raw cidr normalized network
+    local preferred="${1:-}" requested="${INCUS_IPV6_UPLINK:-}" rows selected
+    rows=$(host_ipv6_json_rows addresses) || return 1
     if [ -n "$requested" ] && [[ "$requested" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; then
-        if [ -z "$preferred" ] || ip -o -6 addr show dev "$requested" scope global 2>/dev/null | grep -q .; then
-            printf '%s\n' "$requested"
+        selected=$(select_ipv6_uplink_row "$preferred" "$requested" "$rows" 2>/dev/null || true)
+        if [ -n "$selected" ]; then
+            printf '%s\n' "$selected" | awk -F '\t' 'NF {print $1; exit}'
             return 0
         fi
     fi
-    if [ -n "$preferred" ]; then
-        # The same address can legitimately exist as a host /128 and on a
-        # delegated /38, /64 or /127 bridge. Prefer the interface whose
-        # connected CIDR still has an address available for the guest.
-        while read -r iface cidr; do
-            [ -n "$iface" ] && [ -n "$cidr" ] || continue
-            raw=${cidr%/*}
-            normalized=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
-            [ "$normalized" = "$preferred" ] || continue
-            fallback_iface="${fallback_iface:-$iface}"
-            network=$(ipv6_allocation_network "$cidr" 2>/dev/null || true)
-            if [ -n "$network" ] && ipv6_pool_has_extra_address "$network" "$normalized"; then
-                printf '%s\n' "$iface"
-                return 0
-            fi
-        done < <(ip -o -6 addr show scope global 2>/dev/null | awk '$4 ~ /^[^ ]+\/[0-9]+$/ {print $2, $4}')
-        [ -n "$fallback_iface" ] && { printf '%s\n' "$fallback_iface"; return 0; }
-    fi
-    iface=$(ip -6 route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
-    if [ -n "$iface" ] && ip -o -6 addr show dev "$iface" scope global 2>/dev/null | grep -q .; then
-        printf '%s\n' "$iface"
-        return 0
-    fi
-    # Prefer common tunnel names when the provider has no default route yet.
-    while IFS= read -r iface; do
-        case "$iface" in
-        he-ipv6 | sit* | ip6tnl* | 6in4* | vti* | gre*)
-            if ip -o -6 addr show dev "$iface" scope global 2>/dev/null | grep -q .; then
-                printf '%s\n' "$iface"
-                return 0
-            fi
-            ;;
-        esac
-    done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1)
-    iface=$(detect_primary_ipv6_iface)
-    [ -n "$iface" ] || return 1
-    printf '%s\n' "$iface"
+    selected=$(select_ipv6_uplink_row "$preferred" "" "$rows" 2>/dev/null || true)
+    [ -n "$selected" ] || return 1
+    printf '%s\n' "$selected" | awk -F '\t' 'NF {print $1; exit}'
 }
 
 select_ipv6_interface() {
@@ -439,10 +555,12 @@ PY
 }
 
 ipv6_uplink_cidr() {
-    local iface="$1" preferred="${2:-}" raw
+    local iface="$1" preferred="${2:-}" rows selected
     [ -n "$iface" ] || return 1
-    raw=$(ip -o -6 addr show dev "$iface" scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}')
-    select_ipv6_interface "$preferred" "$raw"
+    rows=$(host_ipv6_json_rows addresses) || return 1
+    selected=$(select_ipv6_uplink_row "$preferred" "$iface" "$rows" 2>/dev/null || true)
+    [ -n "$selected" ] || return 1
+    printf '%s\n' "$selected" | awk -F '\t' 'NF {print $2; exit}'
 }
 
 # A host /128 is a single address, not an address pool.  Conversely, a
@@ -677,6 +795,12 @@ get_real_ipv6_prefixlen_from_router() {
     # 缓存必须是严格的单行整数。禁止把多行诊断通过删除空白拼成值。
     if [ -f "$cache_file" ]; then
         if cached_val=$(read_strict_prefix_file "$cache_file"); then
+            if valid_prefix_length "$current_prefixlen" && [ "$cached_val" != "$current_prefixlen" ]; then
+                _yellow "Cached IPv6 prefix /$cached_val differs from the current interface /$current_prefixlen; refreshing it" >&2
+                write_atomic_scalar "$cache_file" "$current_prefixlen" || return 1
+                printf '%s\n' "$current_prefixlen"
+                return 0
+            fi
             printf '%s\n' "$cached_val"
             return 0
         else
@@ -693,40 +817,32 @@ get_real_ipv6_prefixlen_from_router() {
         _blue "Using network interface: ${interface}" >&2
         _green "正在使用网络接口: ${interface}" >&2
 
-        rdisc6_output=$(timeout 10 rdisc6 "${interface}" 2>/dev/null)
+        rdisc6_output=$(LC_ALL=C NO_COLOR=1 timeout 10 rdisc6 "${interface}" 2>/dev/null)
 
         if [ -n "$rdisc6_output" ]; then
-            # 从路由器通告中提取前缀长度
-            if [ "$GREP_PERL_SUPPORT" = true ]; then
-                # 如果支持 Perl 正则，使用 grep -oP（更精确）
-                real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | grep -oP '[:：]\s*[0-9a-fA-F:]+/\K\d+' | head -n 1)
-            else
-                # 否则使用兼容的 sed 方式，避免 Perl 正则表达式依赖
-                real_prefixlen=$(echo "$rdisc6_output" | safe_grep "Prefix" | sed -n 's/.*[：:][[:space:]]*\([0-9a-fA-F:][0-9a-fA-F:]*\)\/\([0-9][0-9]*\).*/\2/p' | head -n 1)
-            fi
+            # Only the numeric CIDR is relevant; labels may be translated.
+            real_prefixlen=$(printf '%s\n' "$rdisc6_output" | python3 -c '
+import ipaddress, re, sys
+raw = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", sys.stdin.read())
+for token in re.findall(r"[0-9A-Fa-f:]+/[0-9]{1,3}", raw):
+    try:
+        network = ipaddress.IPv6Network(token, strict=False)
+    except ValueError:
+        continue
+    if network.subnet_of(ipaddress.IPv6Network("2000::/3")):
+        print(network.prefixlen)
+        break
+')
 
             # 验证路由器通告的前缀长度必须在 1-128 之间
             if valid_prefix_length "$real_prefixlen"; then
                 _green "Found real IPv6 prefix length from router advertisement: /$real_prefixlen" >&2
                 _green "从路由器通告中发现真实的 IPv6 前缀长度: /$real_prefixlen" >&2
+                # The interface CIDR is authoritative. An RA /64 may coexist
+                # with a routed /38 or /80, and a host /128 is not a guest
+                # address pool merely because a router advertises /64.
                 selected_prefixlen="$current_prefixlen"
                 if ! valid_prefix_length "$selected_prefixlen"; then
-                    selected_prefixlen="$real_prefixlen"
-                fi
-
-                # 规则1: OS 报告的前缀比路由器更宽泛（数字更小），使用路由器更精确的前缀
-                #        例如 OS=/48, 路由器=/64 → 使用 /64（更符合实际分配的子网）
-                if valid_prefix_length "$current_prefixlen" && [ "$current_prefixlen" -lt "$real_prefixlen" ]; then
-                    _green "Using more specific prefix /$real_prefixlen from router advertisement (OS reported /$current_prefixlen)" >&2
-                    _green "使用路由器通告的更精确前缀 /${real_prefixlen}（OS 报告为 /${current_prefixlen}）" >&2
-                    selected_prefixlen="$real_prefixlen"
-                fi
-
-                # 规则2: OS 报告的前缀过于精确（如 /128 主机路由），而路由器通告的是可用子网（≤64）
-                #        这种情况发生在 SLAAC 或 DHCPv6 给宿主机分配了 /128，但实际子网是 /64
-                if valid_prefix_length "$current_prefixlen" && [ "$current_prefixlen" -gt 64 ] && [ "$real_prefixlen" -le 64 ]; then
-                    _yellow "Current prefix /$current_prefixlen is a host route; using router-advertised subnet /$real_prefixlen" >&2
-                    _yellow "当前前缀 /$current_prefixlen 为主机路由，使用路由器通告的子网 /$real_prefixlen" >&2
                     selected_prefixlen="$real_prefixlen"
                 fi
                 write_atomic_scalar "$cache_file" "$selected_prefixlen" || return 1
@@ -898,7 +1014,7 @@ check_ipv6() {
                 break
             fi
         fi
-    done < <(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}')
+    done < <(host_ipv6_json_rows addresses 2>/dev/null | awk -F '\t' '$3 == "global" {print $2}')
     [ -n "$IPV6" ] || IPV6="$fallback"
     if [ -z "$IPV6" ]; then
         _red "No locally bound public IPv6 address is available" >&2
@@ -951,25 +1067,28 @@ update_sysctl() {
     sysctl -w "$key=$value" >/dev/null 2>&1 || return 1
 }
 
+incus_container_status_code() {
+    incus list "$1" --format=json 2>/dev/null |
+        jq -er --arg name "$1" '[.[] | select(.name == $name) | .status_code] |
+            if length == 1 then .[0] else error("container status is unavailable") end'
+}
+
 # 等待容器启动
 wait_for_container_running() {
     local container_name=$1
     local timeout=24
     local interval=3
     local elapsed_time=0
-    local status info
+    local status
     while [ $elapsed_time -lt $timeout ]; do
-        # Starting an already running instance is not an error for this
-        # idempotent readiness helper.  Query first, and only issue `start`
-        # when the current state is not RUNNING.
-        info=$(incus info "$container_name" 2>/dev/null) || return 1
-        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
-        if [ "$status" != RUNNING ]; then
+        # Status codes are part of Incus' JSON API and are independent of
+        # terminal colors and the host's display language.
+        status=$(incus_container_status_code "$container_name") || return 1
+        if [ "$status" != 103 ]; then
             incus start "$container_name" || return 1
         fi
-        info=$(incus info "$container_name" 2>/dev/null) || return 1
-        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
-        if [ "$status" = RUNNING ]; then
+        status=$(incus_container_status_code "$container_name") || return 1
+        if [ "$status" = 103 ]; then
             return 0
         fi
         echo "Waiting for the container $container_name to run..."
@@ -987,17 +1106,15 @@ wait_for_container_stopped() {
     local timeout=24
     local interval=3
     local elapsed_time=0
-    local status info
+    local status
     while [ $elapsed_time -lt $timeout ]; do
-        info=$(incus info "$container_name" 2>/dev/null) || return 1
-        status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
-        if [ "$status" = STOPPED ]; then
+        status=$(incus_container_status_code "$container_name") || return 1
+        if [ "$status" = 102 ]; then
             return 0
         fi
         if ! incus stop "$container_name" 2>/dev/null; then
-            info=$(incus info "$container_name" 2>/dev/null) || return 1
-            status=$(printf '%s\n' "$info" | awk -F: '/^Status:/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')
-            [ "$status" = STOPPED ] || return 1
+            status=$(incus_container_status_code "$container_name") || return 1
+            [ "$status" = 102 ] || return 1
             return 0
         fi
         echo "Waiting for the container $container_name to stop..."
@@ -1033,7 +1150,7 @@ get_container_ipv6() {
 get_host_ipv6_prefix() {
     local raw_cidr="${1:-}" prefix
     if [ -z "$raw_cidr" ]; then
-        raw_cidr=$(ip -6 addr show 2>/dev/null | awk '$1 == "inet6" && $0 ~ /scope global/ {print $2; exit}')
+        raw_cidr=$(host_ipv6_json_rows addresses 2>/dev/null | awk -F '\t' '$3 == "global" {print $2; exit}')
     fi
     if ! prefix=$(normalize_ipv6_network "$raw_cidr" 2>/dev/null); then
         _red "No valid IPv6 subnet, no automatic mapping" >&2
@@ -1049,7 +1166,7 @@ get_host_ipv6_prefix() {
 get_ipv6_gateway_info() {
     local output
     local num_lines
-    output=$(ip -6 route show | awk '/default via/{print $3}')
+    output=$(host_ipv6_json_rows default 2>/dev/null | awk -F '\t' '$2 != "" {print $2}')
     num_lines=$(echo "$output" | wc -l)
     local ipv6_gateway=""
     if [ "$num_lines" -eq 1 ]; then
@@ -1069,30 +1186,47 @@ get_ipv6_gateway_info() {
     fi
 }
 
+rdisc6_router_addresses() {
+    python3 -c '
+import ipaddress, re, sys
+raw = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", sys.stdin.read())
+seen = set()
+for line in raw.splitlines():
+    if not any(label in line.casefold() for label in ("router", "routeur", "路由器")):
+        continue
+    for token in re.findall(r"[0-9A-Fa-f:]+", line):
+        try:
+            address = ipaddress.IPv6Address(token)
+        except ValueError:
+            continue
+        if address not in seen:
+            seen.add(address)
+            print(address.compressed)
+'
+}
+
 ensure_ipv6_default_route() {
     local route iface gateway raw candidates="" output
-    route=$(ip -6 route show default 2>/dev/null || true)
+    route=$(host_ipv6_json_rows default 2>/dev/null || true)
     [ -n "$route" ] && return 0
     iface=$(detect_primary_ipv6_iface) || return 1
     [[ "$iface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || return 1
     while IFS= read -r raw; do
         raw=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
         [ -n "$raw" ] && candidates="${candidates}${raw}\n"
-    done < <(ip -6 neigh show dev "$iface" 2>/dev/null |
-        awk '$0 ~ /[[:space:]]router([[:space:]]|$)/ && $1 ~ /^[0-9A-Fa-f:]+$/ {print $1}')
+    done < <(host_ipv6_json_rows neighbors "$iface" 2>/dev/null)
     if [ -z "$candidates" ] && command -v rdisc6 >/dev/null 2>&1; then
-        output=$(timeout 10 rdisc6 "$iface" 2>/dev/null || true)
+        output=$(LC_ALL=C NO_COLOR=1 timeout 10 rdisc6 "$iface" 2>/dev/null || true)
         while IFS= read -r raw; do
             raw=$(normalize_ipv6_address "$raw" 2>/dev/null || true)
             [ -n "$raw" ] && candidates="${candidates}${raw}\n"
-        done < <(printf '%s\n' "$output" |
-            sed -nE 's/.*Router[[:space:]]*:[[:space:]]*([0-9A-Fa-f:]+).*/\1/p')
+        done < <(printf '%s\n' "$output" | rdisc6_router_addresses)
     fi
     [ -n "$candidates" ] || return 1
     while IFS= read -r gateway; do
         [ -n "$gateway" ] || continue
         ip -6 route replace default via "$gateway" dev "$iface" metric 4096 2>/dev/null || continue
-        if ip -6 route show default dev "$iface" 2>/dev/null | grep -q '^default' &&
+        if host_ipv6_json_rows default 2>/dev/null | awk -F '\t' -v dev="$iface" '$1 == dev {found=1} END {exit !found}' &&
            curl --noproxy '*' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1; then
             _green "Recovered IPv6 default route via ${gateway} on ${iface}."
             return 0
@@ -1227,12 +1361,12 @@ setup_network_device_ipv6() {
         update_sysctl "net.ipv6.conf.all.proxy_ndp=1" || return 1
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1" || return 1
         update_sysctl "net.ipv6.conf.all.forwarding=1" || return 1
-        sysctl_path=$(which sysctl)
-        ${sysctl_path} -p || return 1
+        # update_sysctl already applies each setting. Reloading all of
+        # /etc/sysctl.conf here can restore stale forwarding/RA values and
+        # remove the host's IPv6 default route.
         found_ipv6=""
         while IFS= read -r candidate; do
             [ "$candidate" = "$host_ipv6" ] && continue
-            ip -6 addr show dev "$ipv6_network_name" 2>/dev/null | grep -Fqw "$candidate" && continue
             if ! ping6 -c1 -w1 -q "$candidate" >/dev/null 2>&1; then
                 found_ipv6="$candidate"
                 break
@@ -1246,7 +1380,7 @@ setup_network_device_ipv6() {
         _green "Conatiner $container_name IPV6:"
         _green "$incus_ipv6"
         if ! incus stop "$container_name" 2>/dev/null; then
-            incus info "$container_name" 2>/dev/null | grep -Fq 'Status: STOPPED' || return 1
+            [ "$(incus_container_status_code "$container_name")" = 102 ] || return 1
         fi
         sleep 3
         wait_for_container_stopped "$container_name" || return 1
@@ -1313,7 +1447,6 @@ setup_iptables_ipv6() {
     while IFS= read -r candidate; do
         IPV6="$candidate"
         [[ $IPV6 == "$container_ipv6" ]] && continue
-        ip -6 addr show dev "$interface" | grep -qw "$IPV6" && continue
         if ! ping6 -c1 -w1 -q "$IPV6" &>/dev/null; then
             if [ "$use_nft" = true ]; then
                 if ! nft list ruleset 2>/dev/null | grep -q "dnat ip6 to $container_ipv6" 2>/dev/null || ! nft list ruleset 2>/dev/null | grep -q "$IPV6" 2>/dev/null; then
@@ -1339,9 +1472,10 @@ setup_iptables_ipv6() {
     fi
     valid_prefix_length "$ipv6_length" || return 1
     write_atomic_scalar "$(state_file incus_ipv6_mapping_interface)" "$interface" || return 1
-    write_atomic_scalar "$(state_file incus_ipv6_mapping_prefix_len)" "$ipv6_length" || return 1
+    write_atomic_scalar "$(state_file incus_ipv6_mapping_prefix_len)" 128 || return 1
     write_atomic_scalar "$(state_file incus_ipv6_mode)" public-nat || return 1
-    ip -6 addr replace "$IPV6"/"$ipv6_length" dev "$interface" || return 1
+    # Keep the host's connected route and source address untouched.
+    ip -6 addr replace "$IPV6/128" dev "$interface" || return 1
     if [ "$use_nft" = true ]; then
         # Use nftables for IPv6 DNAT (handles v6 natively)
         if ! nft list table ip6 incus_ipv6_nat >/dev/null 2>&1; then

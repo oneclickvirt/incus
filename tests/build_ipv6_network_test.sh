@@ -23,10 +23,44 @@ exec "$@"
 STUB
 cat >"$TMP_DIR/bin/rdisc6" <<'STUB'
 #!/usr/bin/env bash
-printf 'Prefix                   : 2001:db8:abcd::/64\n'
+printf '\033[36mPréfixe                  : 2001:db8:abcd::/64\033[0m\n'
 STUB
 cat >"$TMP_DIR/bin/ip" <<'STUB'
 #!/usr/bin/env bash
+case "$*" in
+    '-j -6 addr show')
+        if [[ "${INCUS_TEST_TUNNEL:-}" == 1 ]]; then
+            printf '%s\n' '[{"ifname":"he-ipv6","addr_info":[{"family":"inet6","local":"2606:4700::1","prefixlen":64,"scope":"global"}]}]'
+        elif [[ "${INCUS_TEST_SAME_INTERFACE:-}" == 1 ]]; then
+            printf '\033[36m%s\033[0m\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":128,"scope":"global"},{"family":"inet6","local":"2a14:7c0:1002:10f8::2","prefixlen":38,"scope":"global"}]}]'
+        elif [[ "${INCUS_TEST_DELEGATED:-}" == 1 ]]; then
+            printf '\033[36m%s\033[0m\n' '[{"ifname":"vmbr0","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":128,"scope":"global"}]},{"ifname":"vmbr2","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":38,"scope":"global"}]}]'
+        elif [[ "${INCUS_TEST_NO_LOCAL_IPV6:-}" == 1 ]]; then
+            printf '%s\n' '[{"ifname":"eth0","addr_info":[]}]'
+        elif [[ "${INCUS_TEST_LOCAL_ULA_FIRST:-}" == 1 ]]; then
+            printf '%s\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"fd42::1","prefixlen":64,"scope":"global"},{"family":"inet6","local":"2606:4700::1111","prefixlen":64,"scope":"global"}]}]'
+        else
+            printf '%s\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"2606:4700::1111","prefixlen":64,"scope":"global"}]}]'
+        fi
+        exit 0
+        ;;
+    '-j -6 route show default')
+        if [[ -n "${INCUS_TEST_ROUTE_STATE:-}" && -f "$INCUS_TEST_ROUTE_STATE" ]]; then
+            printf '%s\n' '[{"dst":"default","dev":"eth0","gateway":"2606:4700::1"}]'
+        else
+            printf '%s\n' '[]'
+        fi
+        exit 0
+        ;;
+    '-j -6 neigh show dev eth0')
+        printf '%s\n' '[{"dst":"2606:4700::1","router":true}]'
+        exit 0
+        ;;
+    '-j -6 route show table all')
+        printf '%s\n' '[]'
+        exit 0
+        ;;
+esac
 if [[ "${INCUS_TEST_NO_LOCAL_IPV6:-}" == "1" ]]; then
     exit 0
 fi
@@ -47,6 +81,9 @@ export INCUS_STATE_DIR="$TMP_DIR/state"
 export ONECLICKVIRT_TESTING=1
 # shellcheck disable=SC1091 # The test sources the repository script through a computed path.
 . "$ROOT_DIR/scripts/build_ipv6_network.sh"
+
+gateway_rows=$(printf '\033[35mRouteur : fe80::1\033[0m\n路由器：fe80::2\nRouter: fe80::3\n' | rdisc6_router_addresses)
+[[ "$gateway_rows" == $'fe80::1\nfe80::2\nfe80::3' ]] || fail "localized router-advertisement gateways: $gateway_rows"
 
 # shellcheck disable=SC2034 # Read by functions loaded from build_ipv6_network.sh.
 GREP_EXTENDED=-E
@@ -81,30 +118,39 @@ unset INCUS_TEST_NO_LOCAL_IPV6
 # shellcheck disable=SC2329 # Called indirectly by the sourced network helpers.
 ip() {
     case "$*" in
-    "-o -6 addr show scope global")
-        printf '%s\n' \
-            '3: vmbr0    inet6 2a14:7c0:1002:10f8::1/128 scope global' \
-            '5: vmbr2    inet6 2a14:7c0:1002:10f8::1/38 scope global'
-        ;;
-    "-o -6 addr show dev vmbr2 scope global")
-        printf '%s\n' '5: vmbr2    inet6 2a14:7c0:1002:10f8::1/38 scope global'
+    "-j -6 addr show")
+        printf '\033[36m%s\033[0m\n' '[{"ifname":"vmbr0","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":128,"scope":"global"}]},{"ifname":"vmbr2","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":38,"scope":"global"}]}]'
         ;;
     *)
         command ip "$@"
         ;;
     esac
 }
+export INCUS_TEST_DELEGATED=1
 check_ipv6 >/dev/null || fail 'delegated /38 was not accepted'
 assert_eq '2a14:7c0:1002:10f8::1' "$IPV6" 'delegated /38 wins over host /128'
 assert_eq vmbr2 "$(ipv6_uplink_interface "$IPV6")" 'delegated bridge wins over host /128'
+unset INCUS_TEST_DELEGATED
 unset -f ip
+
+# A host-only /128 and a delegated prefix can live on the same interface.
+# The wider prefix must win even when the preferred probe address is the /128.
+export INCUS_TEST_SAME_INTERFACE=1
+check_ipv6 >/dev/null || fail 'same-interface delegated prefix was not accepted'
+assert_eq eth0 "$(ipv6_uplink_interface "$IPV6")" 'same-interface uplink selection'
+assert_eq '2a14:7c0:1002:10f8::2/38' "$(ipv6_uplink_cidr eth0 "$IPV6")" 'same-interface wider prefix selection'
+unset INCUS_TEST_SAME_INTERFACE
 
 # A public address without a default route may recover through a real router
 # neighbor, but the route must be retained only after the external probe works.
 route_state="$TMP_DIR/route-state"
+export INCUS_TEST_ROUTE_STATE="$route_state"
 ip() {
     case "$*" in
-    "-6 route show default") ;;
+    "-j -6 route show default")
+        [ -f "$route_state" ] && printf '%s\n' '[{"dst":"default","dev":"eth0","gateway":"2606:4700::1"}]' || printf '%s\n' '[]'
+        ;;
+    "-j -6 neigh show dev eth0") printf '%s\n' '[{"dst":"2606:4700::1","router":true}]' ;;
     "route show default") printf '%s\n' 'default via 2606:4700::1 dev eth0' ;;
     "-6 neigh show dev eth0") printf '%s\n' '2606:4700::1 dev eth0 lladdr 00:11:22:33:44:55 router REACHABLE' ;;
     "-6 route replace default via 2606:4700::1 dev eth0 metric 4096") printf '%s\n' ok >"$route_state" ;;
@@ -123,6 +169,7 @@ if ensure_ipv6_default_route; then
 fi
 [ ! -e "$route_state" ] || fail "unverified IPv6 route was not rolled back"
 unset -f ip curl
+unset INCUS_TEST_ROUTE_STATE
 
 # shellcheck disable=SC2016 # The literal is the source-code contract under test.
 if ! grep -Fq 'net.ipv6.conf.${ipv6_network_name}.accept_ra=2' "$ROOT_DIR/scripts/build_ipv6_network.sh"; then
@@ -145,13 +192,22 @@ if ! prefix=$(get_real_ipv6_prefixlen_from_router eth0 48 2>"$TMP_DIR/diagnostic
     cat "$TMP_DIR/diagnostics" >&2
     fail "router prefix detection failed"
 fi
-[ "$prefix" = "64" ] || fail "polluted cache produced '$prefix', want 64"
-[ "$(cat "$TMP_DIR/state/incus_ipv6_real_prefixlen")" = "64" ] || fail "clean prefix was not persisted atomically"
+[ "$prefix" = "48" ] || fail "polluted cache changed the host /48 to '$prefix'"
+[ "$(cat "$TMP_DIR/state/incus_ipv6_real_prefixlen")" = "48" ] || fail "host /48 was not persisted atomically"
 grep -q "Attempting to get real IPv6 prefix" "$TMP_DIR/diagnostics" || fail "diagnostics were not sent to stderr"
 
 prefix=$(get_real_ipv6_prefixlen_from_router eth0 48 2>"$TMP_DIR/cached-diagnostics") || fail "clean cache read failed"
-[ "$prefix" = "64" ] || fail "clean cache produced '$prefix'"
+[ "$prefix" = "48" ] || fail "clean cache produced '$prefix'"
 [ ! -s "$TMP_DIR/cached-diagnostics" ] || fail "clean cache unexpectedly emitted diagnostics"
+
+for current in 38 80 128; do
+    prefix=$(get_real_ipv6_prefixlen_from_router eth0 "$current" 2>"$TMP_DIR/cached-diagnostics") || fail "host /$current prefix refresh failed"
+    [ "$prefix" = "$current" ] || fail "RA /64 or stale cache changed host /$current to /$prefix"
+    [ "$(cat "$TMP_DIR/state/incus_ipv6_real_prefixlen")" = "$current" ] || fail "host /$current was not cached"
+done
+rm -f "$TMP_DIR/state/incus_ipv6_real_prefixlen"
+prefix=$(get_real_ipv6_prefixlen_from_router eth0 invalid 2>"$TMP_DIR/diagnostics") || fail 'RA fallback with unknown interface prefix failed'
+[ "$prefix" = "64" ] || fail "unknown interface prefix did not fall back to RA /64: $prefix"
 
 printf '2001:db8::10\n2001:db8::11\n' >"$TMP_DIR/state/incus_check_ipv6"
 if read_strict_ipv6_file "$TMP_DIR/state/incus_check_ipv6" >/dev/null 2>&1; then
@@ -231,8 +287,10 @@ ip() {
     esac
 }
 export INCUS_IPV6_UPLINK=he-ipv6
+export INCUS_TEST_TUNNEL=1
 assert_eq "he-ipv6" "$(ipv6_uplink_interface)" "explicit tunnel uplink"
 assert_eq "2606:4700::1/64" "$(ipv6_uplink_cidr he-ipv6 2606:4700::1)" "tunnel address selection"
+unset INCUS_TEST_TUNNEL
 unset INCUS_IPV6_UPLINK
 unset -f ip
 
@@ -368,6 +426,9 @@ if read_strict_prefix_len "$TMP_DIR/state/incus_ipv6_mapping_prefix_len" >/dev/n
     fail "multiline mapping prefix was accepted"
 fi
 restore_calls="$TMP_DIR/restore-calls"
+# The JSON parser itself is covered by add_ipv6_restore_test.sh. This fixture
+# supplies an empty interface so the legacy restore behavior can be checked.
+restore_ipv6_json_rows() { [ "$1" = addresses ]; }
 # shellcheck disable=SC2329 # Called indirectly by restore_address.
 ip() {
     case "$*" in
@@ -380,6 +441,7 @@ restore_address 'fd42::1' eth0 64
 [ ! -s "$restore_calls" ] || fail "ULA was restored as a public address"
 restore_address '2606:4700::1' eth0 128
 grep -Fq -- '-6 addr replace 2606:4700::1/128 dev eth0' "$restore_calls" || fail "global /128 mapping was not restored"
+unset -f restore_ipv6_json_rows
 unset -f ip
 
 # Readiness is idempotent: an already running instance must not be treated as
@@ -387,10 +449,10 @@ unset -f ip
 start_calls="$TMP_DIR/start-calls"
 stopped_started=false
 incus() {
-    case "$1 $2" in
-        "info running") printf '%s\n' 'Status: RUNNING' ;;
-        "info stopped")
-            if [ "$stopped_started" = true ]; then printf '%s\n' 'Status: RUNNING'; else printf '%s\n' 'Status: STOPPED'; fi
+    case "${1:-} ${2:-}" in
+        "list running") printf '%s\n' '[{"name":"running","status_code":103}]' ;;
+        "list stopped")
+            if [ "$stopped_started" = true ]; then printf '%s\n' '[{"name":"stopped","status_code":103}]'; else printf '%s\n' '[{"name":"stopped","status_code":102}]'; fi
             ;;
         "start stopped") stopped_started=true; printf '%s\n' "$*" >>"$start_calls" ;;
         *) return 1 ;;
@@ -406,8 +468,14 @@ unset -f incus
 
 container_state=RUNNING
 incus() {
-    case "$1 $2" in
-        "info stoptest") printf 'Status: %s\n' "$container_state" ;;
+    case "${1:-} ${2:-}" in
+        "list stoptest")
+            if [ "$container_state" = STOPPED ]; then
+                printf '%s\n' '[{"name":"stoptest","status_code":102}]'
+            else
+                printf '%s\n' '[{"name":"stoptest","status_code":103}]'
+            fi
+            ;;
         "stop stoptest") container_state=STOPPED ;;
         *) return 1 ;;
     esac

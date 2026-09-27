@@ -126,7 +126,7 @@ checkupdate() {
 }
 
 install_required_modules() {
-    modules=("dos2unix" "wget" "curl" "sudo" "bash" "ssh" "lsof" "sshpass" "openssh-server")
+    modules=("dos2unix" "wget" "curl" "sudo" "bash" "ssh" "lsof" "sshpass" "openssh-server" "ca-certificates")
     for module in "${modules[@]}"; do
         if command -v apt-get >/dev/null 2>&1; then
             if command -v $module >/dev/null 2>&1; then
