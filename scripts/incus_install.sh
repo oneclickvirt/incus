@@ -1738,7 +1738,7 @@ ensure_runtime_network() {
     command -v jq >/dev/null 2>&1 || { _red "jq is required to verify initialization"; return 1; }
     incus info >/dev/null 2>&1 || { _red "Incus daemon is unavailable"; return 1; }
     pool=$(active_storage_pool) || { _red "No unambiguous usable storage pool"; return 1; }
-    profiles=$(incus profile list --format csv -c n) || return 1
+    profiles=$(runtime_resource_names profile) || return 1
     if ! grep -Fxq default <<< "$profiles"; then
         incus profile create default || return 1
     fi

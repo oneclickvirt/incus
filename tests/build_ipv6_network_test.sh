@@ -28,6 +28,10 @@ STUB
 cat >"$TMP_DIR/bin/ip" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
+    '-j route show default')
+        printf '%s\n' '[{"dst":"default","dev":"eth0","gateway":"192.0.2.1"}]'
+        exit 0
+        ;;
     '-j -6 addr show')
         if [[ "${INCUS_TEST_TUNNEL:-}" == 1 ]]; then
             printf '%s\n' '[{"ifname":"he-ipv6","addr_info":[{"family":"inet6","local":"2606:4700::1","prefixlen":64,"scope":"global"}]}]'

@@ -79,7 +79,7 @@ incus() {
         'query /1.0/profiles/default') emit_api "$mock_profile" ;;
         'storage list --format json') printf '%s\n' "$mock_pool_list" | jq -Rsc '[split("\n")[] | select(length > 0) | {name: .}]' ;;
         'storage show '*) grep -Fxq "$3" <<< "$mock_pool_list" ;;
-        'profile list --format csv -c n') printf '%s\n' "$mock_profiles" ;;
+        'profile list --format json') printf '%s\n' "$mock_profiles" | jq -Rsc '[split("\n")[] | select(length > 0) | {name: .}]' ;;
         'profile create default') mock_profiles=default; mock_changes=$((mock_changes + 1)) ;;
         'profile device add default root disk path=/ pool=local')
             mock_profile=$(jq '.devices.root = {"type":"disk","path":"/","pool":"local"}' <<< "$mock_profile")

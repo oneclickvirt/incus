@@ -14,7 +14,10 @@ fi
 mock_runtime() {
     printf '%s\n' "$*" >>"$test_dir/calls"
     case "$*" in
-        'storage list --format json'|'--force-local --project default storage list --format json') ;;
+        'storage list --format json'|'profile list --format json'|'network list --format json'|\
+        '--force-local --project default storage list --format json'|\
+        '--force-local --project default profile list --format json'|\
+        '--force-local --project default network list --format json') ;;
         *) printf 'unsupported CLI arguments: %s\n' "$*" >&2; return 88 ;;
     esac
     printf '%s' "$payload"
@@ -26,6 +29,7 @@ LXC_CMD=(mock_runtime --force-local --project default)
 count=0
 for entry in "${entries[@]}"; do
     source <(awk '$0 == "runtime_resource_names() {" { printing=1 } printing { print } printing && /^}$/ { exit }' "$repo_root/$entry")
+    for resource in storage profile network; do
     for scenario in normal empty query_failure malformed object missing_name null_name blank_name empty_stdout multiple_documents; do
         payload='[{"name":"local"},{"name":"other-pool"}]' command_status=0
         case "$scenario" in
@@ -41,7 +45,7 @@ for entry in "${entries[@]}"; do
         esac
         : >"$test_dir/calls"
         status=0
-        result=$(runtime_resource_names storage 2>"$test_dir/error") || status=$?
+        result=$(runtime_resource_names "$resource" 2>"$test_dir/error") || status=$?
         [[ "$(wc -l <"$test_dir/calls" | tr -d ' ')" == 1 ]] || fail 'inventory must use one CLI request'
         case "$scenario" in
             normal) [[ "$status:$result" == $'0:local\nother-pool' ]] || fail "$entry valid inventory failed" ;;
@@ -49,6 +53,7 @@ for entry in "${entries[@]}"; do
             *) [[ "$status" != 0 ]] || fail "$entry hid $scenario" ;;
         esac
         count=$((count + 1))
+    done
     done
 done
 printf 'PASS: runtime JSON inventories (%s scenarios, no skipped tests)\n' "$count"
