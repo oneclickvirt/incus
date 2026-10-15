@@ -405,7 +405,8 @@ handle_image() {
         if [ -z "$kvm_images" ]; then
             echo "Failed to get KVM images list"
             echo "获取KVM镜像列表失败"
-            return 1
+            check_standard_images || return 1
+            return 0
         fi
         while IFS= read -r image_name; do
             [ -n "$image_name" ] || continue
