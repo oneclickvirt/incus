@@ -148,6 +148,22 @@ write_atomic_scalar() {
     fi
 }
 
+ensure_ipv6_proxy_ndp() {
+    local address="$1" interface="$2"
+    [ -n "$address" ] && [ -n "$interface" ] || return 1
+    ip -6 neigh replace proxy "$address" dev "$interface" 2>/dev/null ||
+        ip -6 neigh add proxy "$address" dev "$interface" 2>/dev/null || return 1
+    local mapping_file="$(state_file incus_ipv6_routed_addresses)" tmp
+    mkdir -p "${mapping_file%/*}" || return 1
+    touch "$mapping_file" || return 1
+    if ! grep -Fqx "$interface $address" "$mapping_file" 2>/dev/null; then
+        tmp=$(mktemp "${mapping_file}.tmp.XXXXXX") || return 1
+        cat "$mapping_file" >"$tmp" || { rm -f "$tmp"; return 1; }
+        printf '%s %s\n' "$interface" "$address" >>"$tmp" || { rm -f "$tmp"; return 1; }
+        chmod 0644 "$tmp" && mv -f "$tmp" "$mapping_file" || { rm -f "$tmp"; return 1; }
+    fi
+}
+
 normalize_ipv6_address() {
     local value="$1"
     ! has_unsafe_scalar_chars "$value" || return 1
@@ -1385,6 +1401,7 @@ setup_network_device_ipv6() {
         sleep 3
         wait_for_container_stopped "$container_name" || return 1
         configure_routed_ipv6_device "$container_name" "$ipv6_network_name" "$incus_ipv6" || return 1
+        ensure_ipv6_proxy_ndp "$incus_ipv6" "$ipv6_network_name" || return 1
         sleep 3
         if command -v firewall-cmd >/dev/null 2>&1; then
             firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name" || return 1

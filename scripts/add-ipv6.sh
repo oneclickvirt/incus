@@ -158,6 +158,19 @@ restore_address() {
     fi
 }
 
+restore_routed_proxy_ndp() {
+    local mapping_file="${STATE_DIR}/incus_ipv6_routed_addresses" interface address
+    [ -f "$mapping_file" ] || return 0
+    while read -r interface address; do
+        [ -n "$interface" ] && [ -n "$address" ] || continue
+        valid_interface_name "$interface" || continue
+        ip link show dev "$interface" >/dev/null 2>&1 || continue
+        is_restorable_global_ipv6 "$address" || continue
+        ip -6 neigh replace proxy "$address" dev "$interface" 2>/dev/null ||
+            ip -6 neigh add proxy "$address" dev "$interface" 2>/dev/null || return 1
+    done <"$mapping_file"
+}
+
 main() {
     local interface host_prefixlen file parameter nft_ipv6_addrs addr
     interface=$(get_interface)
@@ -176,6 +189,8 @@ main() {
         echo "NAT66 mode is active; no public IPv6 address restoration is required"
         return 0
     fi
+
+    restore_routed_proxy_ndp || return 1
 
 # Primary: restore from iptables rules.v6 (original method)
 file="/etc/iptables/rules.v6"
