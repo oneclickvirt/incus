@@ -660,6 +660,29 @@ safe_shutdown_container() {
     return 1
 }
 
+wait_for_instance_ssh_ready() {
+    local max_wait="${1:-180}"
+    local interval=3 waited=0 guest_ready=false
+    [[ "$max_wait" =~ ^[0-9]+$ ]] || max_wait=180
+
+    while ((waited <= max_wait)); do
+        guest_ready=false
+        if incus exec "$name" -- sh -c 'awk '\''NR > 1 && $2 ~ /:0016$/ && $4 == "0A" { found=1 } END { exit !found }'\'' /proc/net/tcp /proc/net/tcp6' >/dev/null 2>&1; then
+            guest_ready=true
+        fi
+        [[ "$guest_ready" == true ]] && return 0
+        ((waited >= max_wait)) && break
+        local delay="$interval"
+        ((waited + delay > max_wait)) && delay=$((max_wait - waited))
+        ((delay > 0)) || break
+        sleep "$delay" || return 1
+        waited=$((waited + delay))
+    done
+
+    echo "Error: SSH server inside '$name' did not become ready within ${max_wait}s." >&2
+    return 1
+}
+
 ensure_container_ipv6_cron() {
     incus exec "$name" -- /bin/sh -c 'set -eu; if [ -L /etc/cron.d ]; then exit 1; fi; [ -d /etc/cron.d ] || exit 0; mkdir -p /run/lock; test ! -L /run/lock; lock=/run/lock/oneclickvirt-ipv6.lock.d; acquired=0; i=0; while [ "$i" -lt 100 ]; do if mkdir "$lock" 2>/dev/null; then acquired=1; break; fi; i=$((i + 1)); sleep 0.1; done; [ "$acquired" -eq 1 ]; trap '\''rmdir "$lock" 2>/dev/null || true'\'' EXIT; target=/etc/cron.d/oneclickvirt-ipv6; line="*/1 * * * * root curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1 && curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1"; if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then exit 1; fi; if [ -f "$target" ] && grep -Fqx "$line" "$target"; then exit 0; fi; tmp=$(mktemp /etc/cron.d/.oneclickvirt-ipv6.XXXXXX); trap '\''rm -f -- "$tmp"; rmdir "$lock" 2>/dev/null || true'\'' EXIT; if [ -f "$target" ]; then cat "$target" >"$tmp"; last=$(tail -c 1 "$target" 2>/dev/null | od -An -t x1 | tr -d "[:space:]"); [ -z "$last" ] || [ "$last" = 0a ] || printf "\n" >>"$tmp"; fi; printf "%s\n" "$line" >>"$tmp"; chmod 0644 "$tmp"; mv -f "$tmp" "$target"'
 }
@@ -726,8 +749,11 @@ PY
 # download and validate the current marker before replacing the cached copy.
 refresh_ipv6_helper() {
     local target="${1:-./build_ipv6_network.sh}" source_path script_path temporary
-    local marker='# oneclickvirt-ipv6-helper-version: 2026.09.20'
-    script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || script_path=""
+    local marker='# oneclickvirt-ipv6-helper-version: 2026.10.17'
+    script_path="$OCV_BUILDCT_DIR"
+    if [ -z "$script_path" ]; then
+        script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || script_path=""
+    fi
     source_path="$script_path/build_ipv6_network.sh"
     if [ -f "$source_path" ] && grep -Fqx "$marker" "$source_path"; then
         if ! cmp -s "$source_path" "$target"; then
@@ -831,6 +857,7 @@ configure_network() {
     if [ "$network_type" = "ipv6_only" ]; then
         configure_ipv6_only_dns || return 1
     fi
+    wait_for_instance_ssh_ready || return 1
 }
 
 cleanup_and_finish() {

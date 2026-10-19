@@ -1,7 +1,7 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
 # 2026.08.30
-# oneclickvirt-ipv6-helper-version: 2026.09.20
+# oneclickvirt-ipv6-helper-version: 2026.10.17
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -288,7 +288,14 @@ count = min(limit, network.num_addresses - start)
 for offset in range(count):
     candidate = ipaddress.IPv6Address(int(network.network_address) + start + offset)
     if candidate not in reserved:
-        print(candidate.compressed)
+        try:
+            print(candidate.compressed, flush=True)
+        except BrokenPipeError:
+            try:
+                sys.stdout.close()
+            except OSError:
+                pass
+            raise SystemExit(0)
 PY
 }
 
@@ -1300,10 +1307,90 @@ configure_routed_ipv6_device() {
     fi
 }
 
+existing_routed_ipv6_address() {
+    local container_name="$1" device_type nictype address
+    device_type=$(incus config device get "$container_name" eth1 type 2>/dev/null | tr -d '[:space:]') || return 1
+    [ "$device_type" = nic ] || return 1
+    nictype=$(incus config device get "$container_name" eth1 nictype 2>/dev/null | tr -d '[:space:]') || return 1
+    [ "$nictype" = routed ] || return 1
+    address=$(incus config device get "$container_name" eth1 ipv6.address 2>/dev/null) || return 1
+    normalize_ipv6_address "$address"
+}
+
+is_routed_ipv6_address_usable() {
+    local address="$1" network="$2" host_address="$3"
+    python3 - "$address" "$network" "$host_address" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+    network = ipaddress.IPv6Network(sys.argv[2], strict=False)
+    host_address = ipaddress.IPv6Address(sys.argv[3])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if address.is_global and address in network and address != host_address else 1)
+PY
+}
+
+configure_vm_cloud_init_network() {
+    local container_name="$1" address="$2" normalized primary_mac routed_mac network_config
+    normalized=$(normalize_ipv6_address "$address") || return 1
+    primary_mac=$(incus config get "$container_name" volatile.eth0.hwaddr 2>/dev/null | tr '[:upper:]' '[:lower:]') || return 1
+    routed_mac=$(incus config get "$container_name" volatile.eth1.hwaddr 2>/dev/null | tr '[:upper:]' '[:lower:]') || return 1
+    [[ "$primary_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || return 1
+    [[ "$routed_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || return 1
+    network_config=$(cat <<EOF
+version: 1
+config:
+  - type: physical
+    name: enp5s0
+    mac_address: ${primary_mac}
+    accept-ra: false
+    subnets:
+      - type: dhcp
+  - type: physical
+    name: enp6s0
+    mac_address: ${routed_mac}
+    accept-ra: false
+    subnets:
+      - type: static
+        address: ${normalized}/128
+        gateway: fe80::1
+        dns_nameservers:
+          - 2606:4700:4700::1111
+          - 2001:4860:4860::8888
+EOF
+    )
+    incus config set "$container_name" cloud-init.network-config "$network_config"
+}
+
+configure_routed_ipv6_firewall() {
+    local interface="$1"
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --zone=trusted --add-interface="$interface" || return 1
+        firewall-cmd --reload || return 1
+    elif command -v ufw >/dev/null 2>&1; then
+        ufw allow in on "$interface" || return 1
+        ufw allow out on "$interface" || return 1
+        ufw reload || return 1
+    fi
+}
+
+validate_ipv6_prepare_mode() {
+    local use_iptables="$1"
+    [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ] || return 0
+    if [ "${OCV_IPV6_VM:-0}" != 1 ] || [ "$use_iptables" != n ]; then
+        _red "IPv6 prepare-only mode requires a VM routed-NIC build." >&2
+        return 1
+    fi
+}
+
 setup_network_device_ipv6() {
     local container_name=$1
     local container_ipv6=$2
     local ipv6_gateway_fe80=$3
+    validate_ipv6_prepare_mode n || return 1
     # https://pkgs.org/search/?q=sipcalc
     if [[ "$OS" == "almalinux" ]] || [[ "$OS" == "rocky" ]] || [[ "$OS" == "centos" ]]; then
         ARCH=$(uname -m)
@@ -1381,13 +1468,19 @@ setup_network_device_ipv6() {
         # /etc/sysctl.conf here can restore stale forwarding/RA values and
         # remove the host's IPv6 default route.
         found_ipv6=""
-        while IFS= read -r candidate; do
-            [ "$candidate" = "$host_ipv6" ] && continue
-            if ! ping6 -c1 -w1 -q "$candidate" >/dev/null 2>&1; then
-                found_ipv6="$candidate"
-                break
-            fi
-        done < <(generate_ipv6_candidates "$network_cidr" 65533)
+        if found_ipv6=$(existing_routed_ipv6_address "$container_name" 2>/dev/null) &&
+            ! is_routed_ipv6_address_usable "$found_ipv6" "$network_cidr" "$host_ipv6"; then
+            found_ipv6=""
+        fi
+        if [ -z "$found_ipv6" ]; then
+            while IFS= read -r candidate; do
+                [ "$candidate" = "$host_ipv6" ] && continue
+                if ! ping6 -c1 -w1 -q "$candidate" >/dev/null 2>&1; then
+                    found_ipv6="$candidate"
+                    break
+                fi
+            done < <(generate_ipv6_candidates "$network_cidr" 65533)
+        fi
         if [ -z "$found_ipv6" ]; then
             _red "No available IPv6 address in $network_cidr" >&2
             return 1
@@ -1395,22 +1488,28 @@ setup_network_device_ipv6() {
         incus_ipv6="$found_ipv6"
         _green "Conatiner $container_name IPV6:"
         _green "$incus_ipv6"
-        if ! incus stop "$container_name" 2>/dev/null; then
-            [ "$(incus_container_status_code "$container_name")" = 102 ] || return 1
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            [ "$(incus_container_status_code "$container_name")" = 102 ] || {
+                _red "VM IPv6 bootstrap must run before the first VM start." >&2
+                return 1
+            }
+        else
+            if ! incus stop "$container_name" 2>/dev/null; then
+                [ "$(incus_container_status_code "$container_name")" = 102 ] || return 1
+            fi
+            sleep 3
+            wait_for_container_stopped "$container_name" || return 1
         fi
-        sleep 3
-        wait_for_container_stopped "$container_name" || return 1
         configure_routed_ipv6_device "$container_name" "$ipv6_network_name" "$incus_ipv6" || return 1
         ensure_ipv6_proxy_ndp "$incus_ipv6" "$ipv6_network_name" || return 1
-        sleep 3
-        if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --permanent --zone=trusted --add-interface="$ipv6_network_name" || return 1
-            firewall-cmd --reload || return 1
-        elif command -v ufw >/dev/null 2>&1; then
-            ufw allow in on "$ipv6_network_name" || return 1
-            ufw allow out on "$ipv6_network_name" || return 1
-            ufw reload || return 1
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            [ "${OCV_IPV6_VM:-0}" = 1 ] || return 1
+            configure_vm_cloud_init_network "$container_name" "$incus_ipv6" || return 1
+            configure_routed_ipv6_firewall "$ipv6_network_name" || return 1
+            return 0
         fi
+        sleep 3
+        configure_routed_ipv6_firewall "$ipv6_network_name" || return 1
         incus start "$container_name" || return 1
         # A link-local address is required for RA/NDP and must never be
         # deleted merely because the default route uses a global gateway.
@@ -1424,6 +1523,9 @@ setup_network_device_ipv6() {
     else
         _red "The selected IPv6 prefix has no additional address (a /128 host route is not a pool)." >&2
         _red "所选 IPv6 前缀没有可分配的额外地址（宿主 /128 不是地址池）。" >&2
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     fi
@@ -1574,6 +1676,18 @@ setup_iptables_ipv6() {
     echo "$IPV6" >>"${container_name}_v6"
 }
 
+resolve_container_ipv6_for_mode() {
+    local container_name="$1" use_iptables="$2"
+    if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+        validate_ipv6_prepare_mode "$use_iptables" || return 1
+        CONTAINER_IPV6=""
+        return 0
+    fi
+    wait_for_container_running "$container_name" || return 1
+    sleep 3
+    CONTAINER_IPV6=$(get_container_ipv6 "$container_name") || return 1
+}
+
 main() {
     disable_legacy_link_local_cleanup
     CONTAINER_NAME="$1"
@@ -1587,12 +1701,20 @@ main() {
     install_package net-tools
     install_package cron
     install_package python3
+    validate_ipv6_prepare_mode "$use_iptables" || return 1
     if ! IPV6=$(check_ipv6 2>/dev/null); then
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            _red "VM routed IPv6 preparation requires a locally bound public IPv6 address." >&2
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     if ! ensure_ipv6_default_route; then
         _red "A public IPv6 address exists but no verified IPv6 default route is available." >&2
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            return 1
+        fi
         _yellow "Falling back to the managed network's NAT66 mode." >&2
         configure_ipv6_nat66_fallback || return 1
         return 0
@@ -1600,20 +1722,27 @@ main() {
     interface=$(ipv6_uplink_interface "$IPV6" 2>/dev/null || true)
     if [ -z "$interface" ] || has_unsafe_scalar_chars "$interface" || [[ ! "$interface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; then
         _red "Unable to detect one valid network interface" >&2
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     _yellow "NIC $interface"
     _yellow "网卡 $interface"
-    wait_for_container_running "$CONTAINER_NAME" || return 1
-    sleep 3
-    if ! CONTAINER_IPV6=$(get_container_ipv6 "$CONTAINER_NAME"); then
+    if ! resolve_container_ipv6_for_mode "$CONTAINER_NAME" "$use_iptables"; then
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     fi
     ipv6_address=$(ipv6_uplink_cidr "$interface" "$IPV6" 2>/dev/null || true)
     ipv6_address=$(normalize_ipv6_interface "$ipv6_address" 2>/dev/null) || {
         _red "Unable to detect one valid host IPv6 interface address" >&2
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     }
@@ -1630,6 +1759,10 @@ main() {
     fi
     if ! SUBNET_PREFIX=$(ipv6_allocation_network "$ipv6_address" 2>/dev/null) ||
         ! ipv6_pool_has_extra_address "$SUBNET_PREFIX" "${ipv6_address%/*}"; then
+        if [ "${OCV_IPV6_PREPARE_ONLY:-0}" = 1 ]; then
+            _red "VM routed IPv6 preparation requires an allocatable public IPv6 prefix." >&2
+            return 1
+        fi
         configure_ipv6_nat66_fallback || return 1
         return 0
     fi

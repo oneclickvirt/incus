@@ -300,8 +300,39 @@ run_ssh_setup_exec_boundary_test() {
     )
 }
 
+run_ssh_ready_wait_test() {
+    local kind="$1"
+    (
+        export ONECLICKVIRT_TESTING=1
+        # shellcheck disable=SC1090
+        source "$repo_root/scripts/build${kind}.sh"
+        name="ssh-ready-${kind}"
+        sshn=20001
+        network_type=nat_ipv4
+        local guest_checks=0
+        incus() {
+            [ "${1:-}" = exec ] || return 0
+            guest_checks=$((guest_checks + 1))
+            [ "$guest_checks" -ge 3 ]
+        }
+        sleep() { :; }
+
+        wait_for_instance_ssh_ready 6 || fail "build${kind}: did not tolerate a delayed SSH listener"
+        [ "$guest_checks" -eq 3 ] || fail "build${kind}: expected three guest SSH probes, got $guest_checks"
+
+        guest_checks=0
+        incus() { [ "${1:-}" = exec ] && { guest_checks=$((guest_checks + 1)); return 1; }; return 0; }
+        if wait_for_instance_ssh_ready 4 >/dev/null 2>&1; then
+            fail "build${kind}: reported success without a guest SSH listener"
+        fi
+        [ "$guest_checks" -eq 3 ] || fail "build${kind}: bounded SSH timeout made $guest_checks probes"
+    )
+}
+
 run_ssh_setup_exec_boundary_test ct
 run_ssh_setup_exec_boundary_test vm
+run_ssh_ready_wait_test ct
+run_ssh_ready_wait_test vm
 run_create_failure_test ct
 run_create_failure_test vm
 run_rollback_cleanup_test ct

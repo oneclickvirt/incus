@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Resolve this before any helper changes directory to /root.
+OCV_BUILDVM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || OCV_BUILDVM_DIR=""
 # from
 # https://github.com/oneclickvirt/incus
 # 2026.08.30
@@ -574,6 +576,7 @@ apply_template() {
 
 setup_vm() {
     passwd="$(generate_password)"
+    prepare_vm_ipv6_network || return 1
     incus start "$name" || return 1
     echo "Waiting for VM to start..."
     sleep 30
@@ -705,8 +708,66 @@ safe_shutdown_vm() {
     return 1
 }
 
+wait_for_instance_ssh_ready() {
+    local max_wait="${1:-180}"
+    local interval=3 waited=0 guest_ready=false
+    [[ "$max_wait" =~ ^[0-9]+$ ]] || max_wait=180
+
+    while ((waited <= max_wait)); do
+        guest_ready=false
+        if incus exec "$name" -- sh -c 'awk '\''NR > 1 && $2 ~ /:0016$/ && $4 == "0A" { found=1 } END { exit !found }'\'' /proc/net/tcp /proc/net/tcp6' >/dev/null 2>&1; then
+            guest_ready=true
+        fi
+        [[ "$guest_ready" == true ]] && return 0
+        ((waited >= max_wait)) && break
+        local delay="$interval"
+        ((waited + delay > max_wait)) && delay=$((max_wait - waited))
+        ((delay > 0)) || break
+        sleep "$delay" || return 1
+        waited=$((waited + delay))
+    done
+
+    echo "Error: SSH server inside '$name' did not become ready within ${max_wait}s." >&2
+    return 1
+}
+
 ensure_container_ipv6_cron() {
     incus exec "$name" -- /bin/sh -c 'set -eu; if [ -L /etc/cron.d ]; then exit 1; fi; [ -d /etc/cron.d ] || exit 0; mkdir -p /run/lock; test ! -L /run/lock; lock=/run/lock/oneclickvirt-ipv6.lock.d; acquired=0; i=0; while [ "$i" -lt 100 ]; do if mkdir "$lock" 2>/dev/null; then acquired=1; break; fi; i=$((i + 1)); sleep 0.1; done; [ "$acquired" -eq 1 ]; trap '\''rmdir "$lock" 2>/dev/null || true'\'' EXIT; target=/etc/cron.d/oneclickvirt-ipv6; line="*/1 * * * * root curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1 && curl --noproxy '\''*'\'' -6 -fsS --connect-timeout 6 --max-time 6 https://ipv6.ip.sb >/dev/null 2>&1"; if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then exit 1; fi; if [ -f "$target" ] && grep -Fqx "$line" "$target"; then exit 0; fi; tmp=$(mktemp /etc/cron.d/.oneclickvirt-ipv6.XXXXXX); trap '\''rm -f -- "$tmp"; rmdir "$lock" 2>/dev/null || true'\'' EXIT; if [ -f "$target" ]; then cat "$target" >"$tmp"; last=$(tail -c 1 "$target" 2>/dev/null | od -An -t x1 | tr -d "[:space:]"); [ -z "$last" ] || [ "$last" = 0a ] || printf "\n" >>"$tmp"; fi; printf "%s\n" "$line" >>"$tmp"; chmod 0644 "$tmp"; mv -f "$tmp" "$target"'
+}
+
+refresh_ipv6_helper() {
+    local target="${1:-./build_ipv6_network.sh}" source_path script_path temporary
+    local marker='# oneclickvirt-ipv6-helper-version: 2026.10.17'
+    script_path="$OCV_BUILDVM_DIR"
+    if [ -z "$script_path" ]; then
+        script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || script_path=""
+    fi
+    source_path="$script_path/build_ipv6_network.sh"
+    if [ -f "$source_path" ] && grep -Fqx "$marker" "$source_path"; then
+        if ! cmp -s "$source_path" "$target"; then
+            cp -f -- "$source_path" "$target" || return 1
+        fi
+        chmod +x "$target" || return 1
+        return 0
+    fi
+    if [ -f "$target" ] && grep -Fqx "$marker" "$target"; then
+        chmod +x "$target" || return 1
+        return 0
+    fi
+    temporary=$(mktemp "${target}.tmp.XXXXXX") || return 1
+    if ! curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o "$temporary" ||
+        ! grep -Fqx "$marker" "$temporary"; then
+        rm -f -- "$temporary"
+        echo "Error: downloaded IPv6 helper is missing the expected version marker." >&2
+        return 1
+    fi
+    chmod +x "$temporary" && mv -f -- "$temporary" "$target"
+}
+
+prepare_vm_ipv6_network() {
+    [ "${enable_ipv6:-n}" = y ] || return 0
+    refresh_ipv6_helper ./build_ipv6_network.sh || return 1
+    OCV_IPV6_VM=1 OCV_IPV6_PREPARE_ONLY=1 ./build_ipv6_network.sh "$name"
 }
 
 configure_network() {
@@ -737,10 +798,7 @@ configure_network() {
         if [ "$enable_ipv6" == "y" ]; then
             ensure_container_ipv6_cron || return 1
             sleep 1
-            if [ ! -f "./build_ipv6_network.sh" ]; then
-                curl -fsSLk "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/incus/main/scripts/build_ipv6_network.sh" -o build_ipv6_network.sh || return 1
-                chmod +x build_ipv6_network.sh
-            fi
+            refresh_ipv6_helper ./build_ipv6_network.sh || return 1
             ./build_ipv6_network.sh "$name" || return 1
         fi
     fi
@@ -785,6 +843,7 @@ configure_network() {
         incus config device add "$name" natudp-ports proxy "listen=udp:${ipv4_address}:${nat1}-${nat2}" "connect=udp:0.0.0.0:${nat1}-${nat2}" nat=true || return 1
     fi
     incus start "$name" || return 1
+    wait_for_instance_ssh_ready || return 1
 }
 
 cleanup_and_finish() {

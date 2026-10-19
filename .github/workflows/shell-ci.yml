@@ -75,6 +75,11 @@ jobs:
           bash tests/image_lookup_test.sh
           bash tests/build_ipv6_network_test.sh
           bash tests/build_failure_control_flow_test.sh
+          bash tests/network_mode_contract_test.sh
+          bash tests/ipv6_reserved_addresses_test.sh
+          bash tests/ipv6_cron_d_test.sh
+          bash tests/uninstall_ipv6_cron_test.sh
+          bash tests/add_ipv6_restore_test.sh
           bash tests/image_source_test.sh
           bash tests/retry_curl_sete_test.sh
           bash tests/storage_pool_preservation_test.sh

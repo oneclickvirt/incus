@@ -235,6 +235,15 @@ mapfile -t candidates_127 < <(generate_ipv6_candidates "2001:db8::/127" 10)
 mapfile -t candidates_128 < <(generate_ipv6_candidates "2001:db8::9/128" 10)
 [ "${candidates_128[*]}" = "2001:db8::9" ] || fail "/128 candidates = '${candidates_128[*]}'"
 
+set +e
+generate_ipv6_candidates "2001:db8:abcd:1234::/64" 65533 2>"$TMP_DIR/candidate-stderr" | head -n 1 >"$TMP_DIR/candidate-first"
+candidate_status=${PIPESTATUS[0]}
+set -e
+candidate_first=$(<"$TMP_DIR/candidate-first")
+assert_eq "2001:db8:abcd:1234::3" "$candidate_first" "candidate stream early consumer"
+assert_eq 0 "$candidate_status" "candidate stream early consumer exit status"
+[ ! -s "$TMP_DIR/candidate-stderr" ] || fail "candidate stream emitted a broken-pipe diagnostic"
+
 # Allocation classification must preserve usable routed prefixes while
 # refusing to manufacture a pool from a host-only /128.
 assert_eq "2a14:7c0:1000::/38" "$(ipv6_allocation_network '2a14:7c0:1002:10f8::1/38')" "normalize non-nibble routed prefix"
@@ -486,6 +495,99 @@ incus() {
 }
 wait_for_container_stopped stoptest || fail "running container was not stopped"
 [ "$container_state" = STOPPED ] || fail "stop readiness returned before STOPPED"
+unset -f incus
+
+prepare_wait_calls=0
+prepare_probe_calls=0
+prepare_sleep_calls=0
+wait_for_container_running() { prepare_wait_calls=$((prepare_wait_calls + 1)); }
+get_container_ipv6() { prepare_probe_calls=$((prepare_probe_calls + 1)); printf '%s\n' '2606:4700::10'; }
+sleep() { prepare_sleep_calls=$((prepare_sleep_calls + 1)); }
+OCV_IPV6_PREPARE_ONLY=1
+OCV_IPV6_VM=1
+CONTAINER_IPV6=stale
+resolve_container_ipv6_for_mode vm-test n || fail "VM pre-start IPv6 preparation was rejected"
+assert_eq "" "$CONTAINER_IPV6" "pre-start guest IPv6 placeholder"
+assert_eq 0 "$prepare_wait_calls" "pre-start readiness probe count"
+assert_eq 0 "$prepare_probe_calls" "pre-start guest address probe count"
+assert_eq 0 "$prepare_sleep_calls" "pre-start delay count"
+if resolve_container_ipv6_for_mode vm-test y >/dev/null 2>&1; then
+    fail "pre-start VM IPv6 accepted NAT mapping mode"
+fi
+if OCV_IPV6_VM=0 resolve_container_ipv6_for_mode vm-test n >/dev/null 2>&1; then
+    fail "pre-start VM IPv6 accepted a missing VM marker"
+fi
+if OCV_IPV6_PREPARE_ONLY=1 OCV_IPV6_VM=1 validate_ipv6_prepare_mode y >/dev/null 2>&1; then
+    fail "pre-start IPv6 accepted NAT mapping mode"
+fi
+if OCV_IPV6_PREPARE_ONLY=1 OCV_IPV6_VM=0 validate_ipv6_prepare_mode n >/dev/null 2>&1; then
+    fail "pre-start IPv6 accepted a missing VM marker"
+fi
+OCV_IPV6_PREPARE_ONLY=1 OCV_IPV6_VM=1 validate_ipv6_prepare_mode n || fail "valid VM routed pre-start mode was rejected"
+unset OCV_IPV6_PREPARE_ONLY OCV_IPV6_VM
+unset -f wait_for_container_running get_container_ipv6 sleep
+
+assert_eq 0 "$(is_routed_ipv6_address_usable '2606:4700::10' '2606:4700::/64' '2606:4700::1'; echo $?)" 'reuse a public address in the routed prefix'
+if is_routed_ipv6_address_usable '2606:4701::10' '2606:4700::/64' '2606:4700::1'; then
+    fail "address outside the routed prefix was accepted for reuse"
+fi
+if is_routed_ipv6_address_usable '2606:4700::1' '2606:4700::/64' '2606:4700::1'; then
+    fail "host IPv6 address was accepted for guest reuse"
+fi
+if is_routed_ipv6_address_usable 'fd42::10' '2606:4700::/64' '2606:4700::1'; then
+    fail "ULA was accepted for routed public IPv6 reuse"
+fi
+
+captured_network_config=""
+incus() {
+    if [ "$1" = config ] && [ "$2" = get ] && [ "$3" = vm-test ]; then
+        case "$4" in
+            volatile.eth0.hwaddr) printf '%s\n' '10:66:6a:00:00:01' ;;
+            volatile.eth1.hwaddr) printf '%s\n' '10:66:6a:00:00:02' ;;
+            *) return 1 ;;
+        esac
+        return 0
+    fi
+    [ "$1" = config ] && [ "$2" = set ] && [ "$3" = vm-test ] &&
+        [ "$4" = cloud-init.network-config ] || return 1
+    captured_network_config="$5"
+}
+configure_vm_cloud_init_network vm-test 2606:4700::10 || fail "VM cloud-init network configuration failed"
+grep -Fq 'version: 1' <<<"$captured_network_config" || fail "VM cloud-init network config is not v1"
+grep -Fq 'name: enp5s0' <<<"$captured_network_config" || fail "VM managed interface is missing"
+grep -Fq 'mac_address: 10:66:6a:00:00:01' <<<"$captured_network_config" || fail "VM managed interface MAC is missing"
+grep -Fq 'accept-ra: false' <<<"$captured_network_config" || fail "VM managed interface RA was not disabled"
+grep -Fq 'name: enp6s0' <<<"$captured_network_config" || fail "VM routed interface is missing"
+grep -Fq 'mac_address: 10:66:6a:00:00:02' <<<"$captured_network_config" || fail "VM routed interface MAC is missing"
+grep -Fq 'address: 2606:4700::10/128' <<<"$captured_network_config" || fail "VM routed address was not configured"
+grep -Fq 'gateway: fe80::1' <<<"$captured_network_config" || fail "VM routed gateway was not configured"
+if configure_vm_cloud_init_network vm-test invalid >/dev/null 2>&1; then
+    fail "invalid VM IPv6 address was written to cloud-init"
+fi
+incus() {
+    [ "$1" = config ] && [ "$2" = get ] && [ "$3" = vm-test ] || return 1
+    case "$4" in
+        volatile.eth0.hwaddr) printf '%s\n' invalid ;;
+        volatile.eth1.hwaddr) printf '%s\n' '10:66:6a:00:00:02' ;;
+        *) return 1 ;;
+    esac
+}
+if configure_vm_cloud_init_network vm-test 2606:4700::10 >/dev/null 2>&1; then
+    fail "invalid VM NIC MAC address was written to cloud-init"
+fi
+unset -f incus
+
+existing_device_address=2606:4700::10
+incus() {
+    [ "$1" = config ] && [ "$2" = device ] && [ "$3" = get ] || return 1
+    case "$6" in
+        type) printf '%s\n' nic ;;
+        nictype) printf '%s\n' routed ;;
+        ipv6.address) printf '%s\n' "$existing_device_address" ;;
+        *) return 1 ;;
+    esac
+}
+assert_eq '2606:4700::10' "$(existing_routed_ipv6_address vm-test)" 'preserve the preboot routed address on the later configuration pass'
 unset -f incus
 
 echo "build_ipv6_network tests passed"
