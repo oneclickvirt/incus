@@ -815,6 +815,7 @@ configure_network() {
             sleep 1
             refresh_ipv6_helper ./build_ipv6_network.sh || return 1
             ./build_ipv6_network.sh "$name" || return 1
+            wait_for_instance_ssh_ready || return 1
         fi
     fi
     if command -v firewall-cmd >/dev/null 2>&1; then
