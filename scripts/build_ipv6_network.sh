@@ -1,7 +1,7 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
 # 2026.08.30
-# oneclickvirt-ipv6-helper-version: 2026.10.20
+# oneclickvirt-ipv6-helper-version: 2026.10.20.1
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -1362,6 +1362,10 @@ config:
       - type: static
         address: ${normalized}/128
         gateway: fe80::1
+        routes:
+          - network: ::/0
+            gateway: fe80::1
+            metric: 50
         dns_nameservers:
           - 2606:4700:4700::1111
           - 2001:4860:4860::8888

@@ -752,7 +752,7 @@ PY
 # download and validate the current marker before replacing the cached copy.
 refresh_ipv6_helper() {
     local target="${1:-./build_ipv6_network.sh}" source_path script_path temporary
-    local marker='# oneclickvirt-ipv6-helper-version: 2026.10.20'
+    local marker='# oneclickvirt-ipv6-helper-version: 2026.10.20.1'
     script_path="$OCV_BUILDCT_DIR"
     if [ -z "$script_path" ]; then
         script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || script_path=""

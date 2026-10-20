@@ -574,6 +574,8 @@ grep -Fq 'name: enp6s0' <<<"$captured_network_config" || fail "VM routed interfa
 grep -Fq 'mac_address: 10:66:6a:00:00:02' <<<"$captured_network_config" || fail "VM routed interface MAC is missing"
 grep -Fq 'address: 2606:4700::10/128' <<<"$captured_network_config" || fail "VM routed address was not configured"
 grep -Fq 'gateway: fe80::1' <<<"$captured_network_config" || fail "VM routed gateway was not configured"
+grep -Fq 'network: ::/0' <<<"$captured_network_config" || fail "VM routed default route was not configured"
+grep -Fq 'metric: 50' <<<"$captured_network_config" || fail "VM routed default route did not get priority"
 if configure_vm_cloud_init_network vm-test invalid >/dev/null 2>&1; then
     fail "invalid VM IPv6 address was written to cloud-init"
 fi
