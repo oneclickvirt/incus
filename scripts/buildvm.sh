@@ -13,7 +13,7 @@ load_instance_ownership() {
         if [ -f "$helper" ]; then
             # shellcheck source=/dev/null
             . "$helper" || return 1
-            if declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null; then
+            if declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null && declare -F ocv_instance_is_stopped >/dev/null; then
                 return 0
             fi
         fi
@@ -28,7 +28,7 @@ load_instance_ownership() {
     local status=$?
     rm -f -- "$temporary"
     [ "$status" -eq 0 ] || return "$status"
-    declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null
+    declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null && declare -F ocv_instance_is_stopped >/dev/null
 }
 load_instance_ownership || { echo "Missing instance_ownership.sh; download it with this script." >&2; exit 1; }
 OCV_SCRIPT_RUNTIME=incus
@@ -692,24 +692,22 @@ wait_for_vm_ready_to_shutdown() {
 safe_shutdown_vm() {
     echo "Safely shutting down VM..."
     echo "正在安全关闭虚拟机..."
-    incus stop "$name" --timeout=30 || return 1
-    local max_shutdown_wait=30
+    if ! incus stop "$name" --timeout=120; then
+        ocv_instance_is_stopped "$name" && return 0
+        echo "Error: graceful VM shutdown failed; refusing to configure a running VM." >&2
+        return 1
+    fi
     local waited=0
-    while [ $waited -lt $max_shutdown_wait ]; do
-        local vm_status
-        vm_status=$(incus info "$name" 2>/dev/null | grep "Status:" | awk '{print $2}')
-        if [ "$vm_status" = "STOPPED" ]; then
+    while ((waited < 30)); do
+        if ocv_instance_is_stopped "$name"; then
             echo "VM has been safely stopped"
             echo "虚拟机已安全停止"
             return 0
         fi
-        sleep 2
+        sleep 2 || return 1
         waited=$((waited + 2))
-        echo "Waiting for VM to stop... (${waited}/${max_shutdown_wait}s)"
-        echo "等待虚拟机停止... (${waited}/${max_shutdown_wait}秒)"
     done
-    echo "Error: VM stop timed out; aborting configuration." >&2
-    echo "错误：虚拟机停止超时，已中止配置。" >&2
+    echo "Error: VM stop state remains unconfirmed; aborting configuration." >&2
     return 1
 }
 
