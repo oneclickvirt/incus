@@ -1101,6 +1101,78 @@ incus_container_status_code() {
             if length == 1 then .[0] else error("container status is unavailable") end'
 }
 
+incus_instance_is_virtual_machine() {
+    local instance_name="$1"
+    incus query "/1.0/instances/${instance_name}" 2>/dev/null |
+        jq -er '(.type // .metadata.type // "") == "virtual-machine"' >/dev/null
+}
+
+wait_for_vm_guest_agent() {
+    local instance_name="$1" attempt
+    # A running VM can still have an unavailable agent. Bound every exec
+    # probe so a stopped or wedged guest cannot hold provisioning forever.
+    for ((attempt = 0; attempt < 24; attempt++)); do
+        if timeout -k 3 5 incus exec "$instance_name" -- true >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+configure_vm_guest_ipv6() {
+    local instance_name="$1" address="$2" guest_mac script unit
+    incus_instance_is_virtual_machine "$instance_name" || return 0
+    guest_mac=$(incus config get "$instance_name" volatile.eth1.hwaddr 2>/dev/null || true)
+    guest_mac=$(printf '%s' "$guest_mac" | tr '[:upper:]' '[:lower:]')
+    [[ "$guest_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || return 1
+    address=$(normalize_ipv6_address "$address") || return 1
+    wait_for_vm_guest_agent "$instance_name" || return 1
+    script=$(cat <<EOF
+#!/bin/sh
+set -eu
+TARGET_MAC='$guest_mac'
+TARGET_ADDRESS='$address'
+TARGET_GATEWAY='fe80::1'
+iface=''
+for path in /sys/class/net/*; do
+    [ -e "\$path/address" ] || continue
+    mac=\$(cat "\$path/address" 2>/dev/null || true)
+    if [ "\$(printf '%s' "\$mac" | tr '[:upper:]' '[:lower:]')" = "\$TARGET_MAC" ]; then
+        iface=\$(basename "\$path")
+        break
+    fi
+done
+[ -n "\$iface" ] || exit 1
+ip link set dev "\$iface" up
+ip -6 addr replace "\$TARGET_ADDRESS/128" dev "\$iface"
+ip -6 route replace default via "\$TARGET_GATEWAY" dev "\$iface" metric 50
+EOF
+)
+    unit=$(cat <<'EOF'
+[Unit]
+Description=OneClickVirt routed IPv6 guest address
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oneclickvirt-routed-ipv6
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+    printf '%s\n' "$script" |
+        timeout -k 3 20 incus exec "$instance_name" -- sh -c 'cat > /usr/local/sbin/oneclickvirt-routed-ipv6' || return 1
+    printf '%s\n' "$unit" |
+        timeout -k 3 20 incus exec "$instance_name" -- sh -c 'cat > /etc/systemd/system/oneclickvirt-routed-ipv6.service' || return 1
+    timeout -k 3 20 incus exec "$instance_name" -- chmod 0755 /usr/local/sbin/oneclickvirt-routed-ipv6 || return 1
+    timeout -k 3 20 incus exec "$instance_name" -- systemctl daemon-reload || return 1
+    timeout -k 3 20 incus exec "$instance_name" -- systemctl enable --now oneclickvirt-routed-ipv6.service || return 1
+}
+
 # 等待容器启动
 wait_for_container_running() {
     local container_name=$1
@@ -1520,6 +1592,9 @@ setup_network_device_ipv6() {
         sleep 3
         configure_routed_ipv6_firewall "$ipv6_network_name" || return 1
         incus start "$container_name" || return 1
+        if incus_instance_is_virtual_machine "$container_name"; then
+            configure_vm_guest_ipv6 "$container_name" "$incus_ipv6" || return 1
+        fi
         # A link-local address is required for RA/NDP and must never be
         # deleted merely because the default route uses a global gateway.
         disable_legacy_link_local_cleanup

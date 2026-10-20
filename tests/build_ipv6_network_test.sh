@@ -576,6 +576,8 @@ grep -Fq 'address: 2606:4700::10/128' <<<"$captured_network_config" || fail "VM 
 grep -Fq 'gateway: fe80::1' <<<"$captured_network_config" || fail "VM routed gateway was not configured"
 grep -Fq 'network: ::/0' <<<"$captured_network_config" || fail "VM routed default route was not configured"
 grep -Fq 'metric: 50' <<<"$captured_network_config" || fail "VM routed default route did not get priority"
+grep -Fq 'ip -6 route replace default via "\$TARGET_GATEWAY" dev "\$iface" metric 50' "$ROOT_DIR/scripts/build_ipv6_network.sh" ||
+    fail "VM routed IPv6 persistence service did not set route priority"
 if configure_vm_cloud_init_network vm-test invalid >/dev/null 2>&1; then
     fail "invalid VM IPv6 address was written to cloud-init"
 fi
