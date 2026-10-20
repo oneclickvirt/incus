@@ -213,6 +213,19 @@ rm -f "$TMP_DIR/state/incus_ipv6_real_prefixlen"
 prefix=$(get_real_ipv6_prefixlen_from_router eth0 invalid 2>"$TMP_DIR/diagnostics") || fail 'RA fallback with unknown interface prefix failed'
 [ "$prefix" = "64" ] || fail "unknown interface prefix did not fall back to RA /64: $prefix"
 
+# Scalar state records must be replaced on repeated setup. This specifically
+# protects the public IPv6 record from accumulating duplicate lines after a
+# retry or a stop/start cycle.
+scalar_path="$TMP_DIR/state/repeated_v6"
+write_atomic_scalar "$scalar_path" "2001:db8::10" || fail "initial scalar write failed"
+write_atomic_scalar "$scalar_path" "2001:db8::11" || fail "repeated scalar write failed"
+assert_eq "2001:db8::11" "$(cat "$scalar_path")" "repeated scalar replacement"
+assert_eq "1" "$(wc -l <"$scalar_path" | tr -d ' ')" "scalar line count"
+mkdir "$TMP_DIR/state/scalar-directory"
+if write_atomic_scalar "$TMP_DIR/state/scalar-directory" "2001:db8::12"; then
+    fail "scalar writer accepted a directory target"
+fi
+
 printf '2001:db8::10\n2001:db8::11\n' >"$TMP_DIR/state/incus_check_ipv6"
 if read_strict_ipv6_file "$TMP_DIR/state/incus_check_ipv6" >/dev/null 2>&1; then
     fail "multiline IPv6 cache was accepted"

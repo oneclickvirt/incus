@@ -1,7 +1,7 @@
 #!/bin/bash
 # by hhttps://github.com/oneclickvirt/incus
 # 2026.08.30
-# oneclickvirt-ipv6-helper-version: 2026.10.17
+# oneclickvirt-ipv6-helper-version: 2026.10.20
 
 # 字体颜色函数
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
@@ -140,6 +140,11 @@ write_atomic_scalar() {
     ! has_unsafe_scalar_chars "$value" && [ -n "$value" ] || return 1
     dir=${file%/*}
     [ "$dir" != "$file" ] || dir=.
+    # State records are scalar files. Refuse symlinks and non-regular
+    # existing paths so an atomic replacement cannot write into an unexpected
+    # directory after a partial or malicious setup.
+    [ ! -L "$file" ] || return 1
+    [ ! -e "$file" ] || [ -f "$file" ] || return 1
     mkdir -p "$dir" || return 1
     tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
     if ! printf '%s\n' "$value" >"$tmp" || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$file"; then
@@ -1518,7 +1523,9 @@ setup_network_device_ipv6() {
             _blue "Retaining the link-local IPv6 gateway on ${ipv6_network_name}."
         fi
         setup_ipv6_cron || return 1
-        printf '%s\n' "$incus_ipv6" >>"${container_name}_v6" || return 1
+        # This is the current assigned address, not an append-only log.
+        # Re-running IPv6 setup after a retry or reboot must remain idempotent.
+        write_atomic_scalar "${container_name}_v6" "$incus_ipv6" || return 1
         write_atomic_scalar "$(state_file incus_ipv6_mode)" routed || return 1
     else
         _red "The selected IPv6 prefix has no additional address (a /128 host route is not a pool)." >&2
@@ -1673,7 +1680,8 @@ setup_iptables_ipv6() {
         _red "映射失败"
         exit 1
     fi
-    echo "$IPV6" >>"${container_name}_v6"
+    # Keep the mapping record scalar and idempotent across retries.
+    write_atomic_scalar "${container_name}_v6" "$IPV6" || return 1
 }
 
 resolve_container_ipv6_for_mode() {
