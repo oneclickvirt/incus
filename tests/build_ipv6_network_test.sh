@@ -578,6 +578,8 @@ grep -Fq 'network: ::/0' <<<"$captured_network_config" || fail "VM routed defaul
 grep -Fq 'metric: 50' <<<"$captured_network_config" || fail "VM routed default route did not get priority"
 grep -Fq 'ip -6 route replace default via "\$TARGET_GATEWAY" dev "\$iface" metric 50' "$ROOT_DIR/scripts/build_ipv6_network.sh" ||
     fail "VM routed IPv6 persistence service did not set route priority"
+grep -Fq 'oneclickvirt-incus-ipv6-proxy-ndp.service' "$ROOT_DIR/scripts/build_ipv6_network.sh" ||
+    fail "host proxy-NDP sysctl persistence service is missing"
 if configure_vm_cloud_init_network vm-test invalid >/dev/null 2>&1; then
     fail "invalid VM IPv6 address was written to cloud-init"
 fi

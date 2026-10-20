@@ -1095,6 +1095,44 @@ update_sysctl() {
     sysctl -w "$key=$value" >/dev/null 2>&1 || return 1
 }
 
+persist_proxy_ndp_sysctl() {
+    local interface="$1" unit_path="/etc/systemd/system/oneclickvirt-incus-ipv6-proxy-ndp.service"
+    local sysctl_bin unit_tmp
+    [[ "$interface" =~ ^[[:alnum:]_.:-]{1,15}$ ]] || return 1
+    command -v systemctl >/dev/null 2>&1 || return 0
+    sysctl_bin=$(command -v sysctl) || return 1
+    [ ! -L "$unit_path" ] || return 1
+    [ ! -e "$unit_path" ] || [ -f "$unit_path" ] || return 1
+    unit_tmp=$(mktemp /etc/systemd/system/oneclickvirt-incus-ipv6-proxy-ndp.service.tmp.XXXXXX) || return 1
+    if ! cat >"$unit_tmp" <<EOF
+[Unit]
+Description=OneClickVirt Incus IPv6 proxy NDP readiness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$sysctl_bin -w net.ipv6.conf.all.proxy_ndp=1
+ExecStart=$sysctl_bin -w net.ipv6.conf.$interface.proxy_ndp=1
+ExecStart=$sysctl_bin -w net.ipv6.conf.all.forwarding=1
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        rm -f -- "$unit_tmp"
+        return 1
+    fi
+    if ! chmod 0644 "$unit_tmp" || ! mv -f -- "$unit_tmp" "$unit_path"; then
+        rm -f -- "$unit_tmp"
+        return 1
+    fi
+    systemctl daemon-reload || return 1
+    systemctl enable oneclickvirt-incus-ipv6-proxy-ndp.service >/dev/null 2>&1 || return 1
+    systemctl start oneclickvirt-incus-ipv6-proxy-ndp.service || return 1
+}
+
 incus_container_status_code() {
     incus list "$1" --format=json 2>/dev/null |
         jq -er --arg name "$1" '[.[] | select(.name == $name) | .status_code] |
@@ -1545,6 +1583,7 @@ setup_network_device_ipv6() {
         update_sysctl "net.ipv6.conf.all.proxy_ndp=1" || return 1
         update_sysctl "net.ipv6.conf.${ipv6_network_name}.proxy_ndp=1" || return 1
         update_sysctl "net.ipv6.conf.all.forwarding=1" || return 1
+        persist_proxy_ndp_sysctl "$ipv6_network_name" || return 1
         # update_sysctl already applies each setting. Reloading all of
         # /etc/sysctl.conf here can restore stale forwarding/RA values and
         # remove the host's IPv6 default route.
