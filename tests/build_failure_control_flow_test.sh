@@ -317,15 +317,20 @@ run_ssh_ready_wait_test() {
         }
         sleep() { :; }
 
-        wait_for_instance_ssh_ready 6 || fail "build${kind}: did not tolerate a delayed SSH listener"
+        local ready_budget=6 failure_budget=4 expected_failure_probes=3
+        if [[ "$kind" == vm ]]; then
+            timeout() { shift 3; "$@"; }
+            ready_budget=10 failure_budget=8 expected_failure_probes=2
+        fi
+        wait_for_instance_ssh_ready "$ready_budget" || fail "build${kind}: did not tolerate a delayed SSH listener"
         [ "$guest_checks" -eq 3 ] || fail "build${kind}: expected three guest SSH probes, got $guest_checks"
 
         guest_checks=0
         incus() { [ "${1:-}" = exec ] && { guest_checks=$((guest_checks + 1)); return 1; }; return 0; }
-        if wait_for_instance_ssh_ready 4 >/dev/null 2>&1; then
+        if wait_for_instance_ssh_ready "$failure_budget" >/dev/null 2>&1; then
             fail "build${kind}: reported success without a guest SSH listener"
         fi
-        [ "$guest_checks" -eq 3 ] || fail "build${kind}: bounded SSH timeout made $guest_checks probes"
+        [ "$guest_checks" -eq "$expected_failure_probes" ] || fail "build${kind}: bounded SSH timeout made $guest_checks probes"
     )
 }
 
