@@ -14,7 +14,9 @@ load_instance_ownership() {
         if [ -f "$helper" ]; then
             # shellcheck source=/dev/null
             . "$helper" || return 1
-            return 0
+            if declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null; then
+                return 0
+            fi
         fi
     done
     temporary=$(mktemp "${TMPDIR:-/tmp}/incus-ownership.XXXXXX") || return 1
@@ -26,7 +28,8 @@ load_instance_ownership() {
     . "$temporary"
     local status=$?
     rm -f -- "$temporary"
-    return "$status"
+    [ "$status" -eq 0 ] || return "$status"
+    declare -F ocv_import_split_image >/dev/null && declare -F ocv_image_alias_target >/dev/null
 }
 load_instance_ownership || { echo "Missing instance_ownership.sh; download it with this script." >&2; exit 1; }
 OCV_SCRIPT_RUNTIME=incus
@@ -351,8 +354,8 @@ handle_image() {
             if [ -n "$image_name" ]; then
                 fixed_system=true
                 image_download_url="https://github.com/oneclickvirt/incus_images/releases/download/${a}/${image_name}"
-                image_alias_output=$(incus image alias list)
-                if [[ "$image_alias_output" != *"$image_name"* ]]; then
+                image_alias_output=$(ocv_image_alias_target "$image_name") || return 1
+                if [ -z "$image_alias_output" ]; then
                     import_image "$image_name" "$image_download_url" || return 1
                     echo "A matching image exists and will be created using ${image_download_url}"
                     echo "匹配的镜像存在，将使用 ${image_download_url} 进行创建"
@@ -374,7 +377,7 @@ import_image() {
     chmod 755 "$image_name" || return 1
     unzip "$image_name" || return 1
     rm -f -- "$image_name"
-    incus image import incus.tar.xz rootfs.squashfs --alias "$image_name" || return 1
+    ocv_import_split_image incus.tar.xz rootfs.squashfs "$image_name" || return 1
     rm -f -- incus.tar.xz rootfs.squashfs
 }
 
