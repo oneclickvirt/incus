@@ -1,5 +1,11 @@
 ### 更新日志
 
+## 2026-10-21
+
+- 持久化 networkd 的 proxy NDP 设置并在 Incus 自动启动前恢复转发设置，避免重启覆盖 sysctl。
+- 为 IPv6-only 虚拟机按 MAC 保存 networkd 网卡及路由，避免 network-online 等待已移除的 IPv4 网卡。
+- 同步容器、虚拟机脚本的 IPv6 helper 版本，并添加启动顺序及失败传播回归测试。
+
 2026.06.15
 
 - 修复 `add_more.sh` 批量新增容器时系统镜像校验过窄导致 `debian11`、`debian/11` 等输入被误判为无匹配镜像的问题
