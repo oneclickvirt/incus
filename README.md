@@ -4,35 +4,7 @@
 
 ## 更新
 
-2026.08.30
-
-- 安装器不再删除或改写既有 `default`、用户创建和已记录的存储池；新建自管存储使用独立的 `oneclickvirt` 池，保留原有实例和数据卷
-- CT、VM 与批量创建改为失败即回滚本次新建实例和暂存日志，不会误删既有同名实例；IPv6 转发仍只在真实上联网卡启用 NDP 代理
-
 [更新日志](CHANGELOG.md)
-
-## 常用无交互入口 / Non-interactive helpers
-
-统一使用 `export noninteractive=true` 指定无需交互模式。
-
-Use `export noninteractive=true` for unattended runs.
-
-```bash
-export noninteractive=true
-export INCUS_TEMPLATE=web
-bash buildct.sh web1 1 512 5 20001 20002 20025 300 300 N debian12
-
-export INCUS_OP_ACTION=backup
-export INCUS_OP_INSTANCE=web1
-bash instance_ops.sh
-
-export INCUS_MACVLAN_ACTION=attach
-export INCUS_MACVLAN_INSTANCE=web1
-bash macvlan.sh
-
-export SWAP_ACTION=reset
-bash scripts/swap2.sh
-```
 
 ## 说明文档
 
