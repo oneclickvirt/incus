@@ -48,4 +48,4 @@ https://github.com/spiritLHLS/ecs
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/oneclickvirt/incus.svg?background=%23FFFFFF&axis=%23333333&line=%236b63ff)](https://starchart.cc/oneclickvirt/incus)
+[![Stargazers over time](https://api.star-history.com/chart?repos=oneclickvirt/incus&type=date)](https://starchart.cc/oneclickvirt/incus)
